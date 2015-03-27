@@ -1,7 +1,40 @@
-// this file is the concatenation of several js files. See https://github.com/jimhigson/oboe-browser.js/tree/master/src for the unconcatenated source
+// this file is the concatenation of several js files. See http://github.com/jimhigson/oboe.js
+// for the unconcatenated source
+
 module.exports = (function  () {
-var clarinet = require("clarinet");
-// v1.12.1-7-g08a2134
+   
+   // v2.1.0-1-gce46063
+
+/*
+
+Copyright (c) 2013, Jim Higson
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+1.  Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+2.  Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+*/
 
 /** 
  * Partially complete a function.
@@ -85,7 +118,7 @@ function compose2(f1, f2){
  * @param {String} key the property name
  */
 function attr(key) {
-   return new Function('o', 'return o["' + key + '"]' );
+   return function(o) { return o[key]; };
 }
         
 /**
@@ -304,13 +337,18 @@ function hasAllProperties(fieldList, o) {
 function cons(x, xs) {
    
    /* Internally lists are linked 2-element Javascript arrays.
-    
-      So that lists are all immutable we Object.freeze in newer 
-      Javascript runtimes.
-      
-      In older engines freeze should have been polyfilled as the 
-      identity function. */
-   return Object.freeze([x,xs]);
+          
+      Ideally the return here would be Object.freeze([x,xs])
+      so that bugs related to mutation are found fast.
+      However, cons is right on the critical path for
+      performance and this slows oboe-mark down by
+      ~25%. Under theoretical future JS engines that freeze more
+      efficiently (possibly even use immutability to
+      run faster) this should be considered for
+      restoration.
+   */
+   
+   return [x,xs];
 }
 
 /**
@@ -452,12 +490,12 @@ function all(fn, list) {
  * it doesn't return anything. Hence, this is only really useful if the
  * functions being called have side-effects. 
  */
-function applyEach(fnList, arguments) {
+function applyEach(fnList, args) {
 
    if( fnList ) {  
-      head(fnList).apply(null, arguments);
+      head(fnList).apply(null, args);
       
-      applyEach(tail(fnList), arguments);
+      applyEach(tail(fnList), args);
    }
 }
 
@@ -486,6 +524,509 @@ function first(test, list) {
                   : first(test,tail(list))); 
 }
 
+/* 
+   This is a slightly hacked-up browser only version of clarinet 
+   
+      *  some features removed to help keep browser Oboe under 
+         the 5k micro-library limit
+      *  plug directly into event bus
+   
+   For the original go here:
+      https://github.com/dscape/clarinet
+
+   We receive the events:
+      STREAM_DATA
+      STREAM_END
+      
+   We emit the events:
+      SAX_KEY
+      SAX_VALUE_OPEN
+      SAX_VALUE_CLOSE      
+      FAIL_EVENT      
+ */
+
+function clarinet(eventBus) {
+  "use strict";
+   
+  var 
+      // shortcut some events on the bus
+      emitSaxKey           = eventBus(SAX_KEY).emit,
+      emitValueOpen        = eventBus(SAX_VALUE_OPEN).emit,
+      emitValueClose       = eventBus(SAX_VALUE_CLOSE).emit,
+      emitFail             = eventBus(FAIL_EVENT).emit,
+              
+      MAX_BUFFER_LENGTH = 64 * 1024
+  ,   stringTokenPattern = /[\\"\n]/g
+  ,   _n = 0
+  
+      // states
+  ,   BEGIN                = _n++
+  ,   VALUE                = _n++ // general stuff
+  ,   OPEN_OBJECT          = _n++ // {
+  ,   CLOSE_OBJECT         = _n++ // }
+  ,   OPEN_ARRAY           = _n++ // [
+  ,   CLOSE_ARRAY          = _n++ // ]
+  ,   STRING               = _n++ // ""
+  ,   OPEN_KEY             = _n++ // , "a"
+  ,   CLOSE_KEY            = _n++ // :
+  ,   TRUE                 = _n++ // r
+  ,   TRUE2                = _n++ // u
+  ,   TRUE3                = _n++ // e
+  ,   FALSE                = _n++ // a
+  ,   FALSE2               = _n++ // l
+  ,   FALSE3               = _n++ // s
+  ,   FALSE4               = _n++ // e
+  ,   NULL                 = _n++ // u
+  ,   NULL2                = _n++ // l
+  ,   NULL3                = _n++ // l
+  ,   NUMBER_DECIMAL_POINT = _n++ // .
+  ,   NUMBER_DIGIT         = _n   // [0-9]
+
+      // setup initial parser values
+  ,   bufferCheckPosition  = MAX_BUFFER_LENGTH
+  ,   latestError                
+  ,   c                    
+  ,   p                    
+  ,   textNode             = ""
+  ,   numberNode           = ""     
+  ,   slashed              = false
+  ,   closed               = false
+  ,   state                = BEGIN
+  ,   stack                = []
+  ,   unicodeS             = null
+  ,   unicodeI             = 0
+  ,   depth                = 0
+  ,   position             = 0
+  ,   column               = 0  //mostly for error reporting
+  ,   line                 = 1
+  ;
+
+  function checkBufferLength () {
+     
+    var maxActual = 0;
+     
+    if (textNode.length > MAX_BUFFER_LENGTH) {
+      emitError("Max buffer length exceeded: textNode");
+      maxActual = Math.max(maxActual, textNode.length);
+    }
+    if (numberNode.length > MAX_BUFFER_LENGTH) {
+      emitError("Max buffer length exceeded: numberNode");
+      maxActual = Math.max(maxActual, numberNode.length);
+    }
+     
+    bufferCheckPosition = (MAX_BUFFER_LENGTH - maxActual)
+                               + position;
+  }
+
+  eventBus(STREAM_DATA).on(handleData);
+
+   /* At the end of the http content close the clarinet 
+    This will provide an error if the total content provided was not 
+    valid json, ie if not all arrays, objects and Strings closed properly */
+  eventBus(STREAM_END).on(handleStreamEnd);   
+
+  function emitError (errorString) {
+     if (textNode) {
+        emitValueOpen(textNode);
+        emitValueClose();
+        textNode = "";
+     }
+
+     latestError = Error(errorString + "\nLn: "+line+
+                                       "\nCol: "+column+
+                                       "\nChr: "+c);
+     
+     emitFail(errorReport(undefined, undefined, latestError));
+  }
+
+  function handleStreamEnd() {
+    if( state == BEGIN ) {
+      // Handle the case where the stream closes without ever receiving
+      // any input. This isn't an error - response bodies can be blank,
+      // particularly for 204 http responses
+      
+      // Because of how Oboe is currently implemented, we parse a
+      // completely empty stream as containing an empty object.
+      // This is because Oboe's done event is only fired when the
+      // root object of the JSON stream closes.
+      
+      // This should be decoupled and attached instead to the input stream
+      // from the http (or whatever) resource ending.
+      // If this decoupling could happen the SAX parser could simply emit
+      // zero events on a completely empty input.
+      emitValueOpen({});
+      emitValueClose();
+
+      closed = true;
+      return;
+    }
+  
+    if (state !== VALUE || depth !== 0)
+      emitError("Unexpected end");
+ 
+    if (textNode) {
+      emitValueOpen(textNode);
+      emitValueClose();
+      textNode = "";
+    }
+     
+    closed = true;
+  }
+
+  function whitespace(c){
+     return c == '\r' || c == '\n' || c == ' ' || c == '\t';
+  }
+   
+  function handleData (chunk) {
+         
+    // this used to throw the error but inside Oboe we will have already
+    // gotten the error when it was emitted. The important thing is to
+    // not continue with the parse.
+    if (latestError)
+      return;
+      
+    if (closed) {
+       return emitError("Cannot write after close");
+    }
+
+    var i = 0;
+    c = chunk[0]; 
+
+    while (c) {
+      p = c;
+      c = chunk[i++];
+      if(!c) break;
+
+      position ++;
+      if (c == "\n") {
+        line ++;
+        column = 0;
+      } else column ++;
+      switch (state) {
+
+        case BEGIN:
+          if (c === "{") state = OPEN_OBJECT;
+          else if (c === "[") state = OPEN_ARRAY;
+          else if (!whitespace(c))
+            return emitError("Non-whitespace before {[.");
+        continue;
+
+        case OPEN_KEY:
+        case OPEN_OBJECT:
+          if (whitespace(c)) continue;
+          if(state === OPEN_KEY) stack.push(CLOSE_KEY);
+          else {
+            if(c === '}') {
+              emitValueOpen({});
+              emitValueClose();
+              state = stack.pop() || VALUE;
+              continue;
+            } else  stack.push(CLOSE_OBJECT);
+          }
+          if(c === '"')
+             state = STRING;
+          else
+             return emitError("Malformed object key should start with \" ");
+        continue;
+
+        case CLOSE_KEY:
+        case CLOSE_OBJECT:
+          if (whitespace(c)) continue;
+
+          if(c===':') {
+            if(state === CLOSE_OBJECT) {
+              stack.push(CLOSE_OBJECT);
+
+               if (textNode) {
+                  // was previously (in upstream Clarinet) one event
+                  //  - object open came with the text of the first
+                  emitValueOpen({});
+                  emitSaxKey(textNode);
+                  textNode = "";
+               }
+               depth++;
+            } else {
+               if (textNode) {
+                  emitSaxKey(textNode);
+                  textNode = "";
+               }
+            }
+             state  = VALUE;
+          } else if (c==='}') {
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             emitValueClose();
+            depth--;
+            state = stack.pop() || VALUE;
+          } else if(c===',') {
+            if(state === CLOSE_OBJECT)
+              stack.push(CLOSE_OBJECT);
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             state  = OPEN_KEY;
+          } else 
+             return emitError('Bad object');
+        continue;
+
+        case OPEN_ARRAY: // after an array there always a value
+        case VALUE:
+          if (whitespace(c)) continue;
+          if(state===OPEN_ARRAY) {
+            emitValueOpen([]);
+            depth++;             
+            state = VALUE;
+            if(c === ']') {
+              emitValueClose();
+              depth--;
+              state = stack.pop() || VALUE;
+              continue;
+            } else {
+              stack.push(CLOSE_ARRAY);
+            }
+          }
+               if(c === '"') state = STRING;
+          else if(c === '{') state = OPEN_OBJECT;
+          else if(c === '[') state = OPEN_ARRAY;
+          else if(c === 't') state = TRUE;
+          else if(c === 'f') state = FALSE;
+          else if(c === 'n') state = NULL;
+          else if(c === '-') { // keep and continue
+            numberNode += c;
+          } else if(c==='0') {
+            numberNode += c;
+            state = NUMBER_DIGIT;
+          } else if('123456789'.indexOf(c) !== -1) {
+            numberNode += c;
+            state = NUMBER_DIGIT;
+          } else               
+            return emitError("Bad value");
+        continue;
+
+        case CLOSE_ARRAY:
+          if(c===',') {
+            stack.push(CLOSE_ARRAY);
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             state  = VALUE;
+          } else if (c===']') {
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             emitValueClose();
+            depth--;
+            state = stack.pop() || VALUE;
+          } else if (whitespace(c))
+              continue;
+          else 
+             return emitError('Bad array');
+        continue;
+
+        case STRING:
+          // thanks thejh, this is an about 50% performance improvement.
+          var starti              = i-1;
+           
+          STRING_BIGLOOP: while (true) {
+
+            // zero means "no unicode active". 1-4 mean "parse some more". end after 4.
+            while (unicodeI > 0) {
+              unicodeS += c;
+              c = chunk.charAt(i++);
+              if (unicodeI === 4) {
+                // TODO this might be slow? well, probably not used too often anyway
+                textNode += String.fromCharCode(parseInt(unicodeS, 16));
+                unicodeI = 0;
+                starti = i-1;
+              } else {
+                unicodeI++;
+              }
+              // we can just break here: no stuff we skipped that still has to be sliced out or so
+              if (!c) break STRING_BIGLOOP;
+            }
+            if (c === '"' && !slashed) {
+              state = stack.pop() || VALUE;
+              textNode += chunk.substring(starti, i-1);
+              if(!textNode) {
+                 emitValueOpen("");
+                 emitValueClose();
+              }
+              break;
+            }
+            if (c === '\\' && !slashed) {
+              slashed = true;
+              textNode += chunk.substring(starti, i-1);
+               c = chunk.charAt(i++);
+              if (!c) break;
+            }
+            if (slashed) {
+              slashed = false;
+                   if (c === 'n') { textNode += '\n'; }
+              else if (c === 'r') { textNode += '\r'; }
+              else if (c === 't') { textNode += '\t'; }
+              else if (c === 'f') { textNode += '\f'; }
+              else if (c === 'b') { textNode += '\b'; }
+              else if (c === 'u') {
+                // \uxxxx. meh!
+                unicodeI = 1;
+                unicodeS = '';
+              } else {
+                textNode += c;
+              }
+              c = chunk.charAt(i++);
+              starti = i-1;
+              if (!c) break;
+              else continue;
+            }
+
+            stringTokenPattern.lastIndex = i;
+            var reResult = stringTokenPattern.exec(chunk);
+            if (!reResult) {
+              i = chunk.length+1;
+              textNode += chunk.substring(starti, i-1);
+              break;
+            }
+            i = reResult.index+1;
+            c = chunk.charAt(reResult.index);
+            if (!c) {
+              textNode += chunk.substring(starti, i-1);
+              break;
+            }
+          }
+        continue;
+
+        case TRUE:
+          if (!c)  continue; // strange buffers
+          if (c==='r') state = TRUE2;
+          else
+             return emitError( 'Invalid true started with t'+ c);
+        continue;
+
+        case TRUE2:
+          if (!c)  continue;
+          if (c==='u') state = TRUE3;
+          else
+             return emitError('Invalid true started with tr'+ c);
+        continue;
+
+        case TRUE3:
+          if (!c) continue;
+          if(c==='e') {
+            emitValueOpen(true);
+            emitValueClose();
+            state = stack.pop() || VALUE;
+          } else
+             return emitError('Invalid true started with tru'+ c);
+        continue;
+
+        case FALSE:
+          if (!c)  continue;
+          if (c==='a') state = FALSE2;
+          else
+             return emitError('Invalid false started with f'+ c);
+        continue;
+
+        case FALSE2:
+          if (!c)  continue;
+          if (c==='l') state = FALSE3;
+          else
+             return emitError('Invalid false started with fa'+ c);
+        continue;
+
+        case FALSE3:
+          if (!c)  continue;
+          if (c==='s') state = FALSE4;
+          else
+             return emitError('Invalid false started with fal'+ c);
+        continue;
+
+        case FALSE4:
+          if (!c)  continue;
+          if (c==='e') {
+            emitValueOpen(false);
+            emitValueClose();
+            state = stack.pop() || VALUE;
+          } else
+             return emitError('Invalid false started with fals'+ c);
+        continue;
+
+        case NULL:
+          if (!c)  continue;
+          if (c==='u') state = NULL2;
+          else
+             return emitError('Invalid null started with n'+ c);
+        continue;
+
+        case NULL2:
+          if (!c)  continue;
+          if (c==='l') state = NULL3;
+          else
+             return emitError('Invalid null started with nu'+ c);
+        continue;
+
+        case NULL3:
+          if (!c) continue;
+          if(c==='l') {
+            emitValueOpen(null);
+            emitValueClose();
+            state = stack.pop() || VALUE;
+          } else 
+             return emitError('Invalid null started with nul'+ c);
+        continue;
+
+        case NUMBER_DECIMAL_POINT:
+          if(c==='.') {
+            numberNode += c;
+            state       = NUMBER_DIGIT;
+          } else 
+             return emitError('Leading zero not followed by .');
+        continue;
+
+        case NUMBER_DIGIT:
+          if('0123456789'.indexOf(c) !== -1) numberNode += c;
+          else if (c==='.') {
+            if(numberNode.indexOf('.')!==-1)
+               return emitError('Invalid number has two dots');
+            numberNode += c;
+          } else if (c==='e' || c==='E') {
+            if(numberNode.indexOf('e')!==-1 ||
+               numberNode.indexOf('E')!==-1 )
+               return emitError('Invalid number has two exponential');
+            numberNode += c;
+          } else if (c==="+" || c==="-") {
+            if(!(p==='e' || p==='E'))
+               return emitError('Invalid symbol in number');
+            numberNode += c;
+          } else {
+            if (numberNode) {
+              emitValueOpen(parseFloat(numberNode));
+              emitValueClose();
+              numberNode = "";
+            }
+            i--; // go back one
+            state = stack.pop() || VALUE;
+          }
+        continue;
+
+        default:
+          return emitError("Unknown state: " + state);
+      }
+    }
+    if (position >= bufferCheckPosition)
+      checkBufferLength();
+  }
+}
+
+
 /** 
  * A bridge used to assign stateless functions to listen to clarinet.
  * 
@@ -494,26 +1035,61 @@ function first(test, list) {
  * 
  * This may also be used to clear all listeners by assigning zero handlers:
  * 
- *    clarinetListenerAdaptor( clarinet, {} )
+ *    ascentManager( clarinet, {} )
  */
-function clarinetListenerAdaptor(clarinetParser, handlers){
-    
-   var state;
+function ascentManager(oboeBus, handlers){
+   "use strict";
+   
+   var listenerId = {},
+       ascent;
 
-   clarinet.EVENTS.forEach(function(eventName){
- 
-      var handlerFunction = handlers[eventName];
+   function stateAfter(handler) {
+      return function(param){
+         ascent = handler( ascent, param);
+      }
+   }
+   
+   for( var eventName in handlers ) {
+
+      oboeBus(eventName).on(stateAfter(handlers[eventName]), listenerId);
+   }
+   
+   oboeBus(NODE_SWAP).on(function(newNode) {
       
-      clarinetParser['on'+eventName] = handlerFunction && 
-                                       function(param) {
-                                          state = handlerFunction( state, param);
-                                       };
+      var oldHead = head(ascent),
+          key = keyOf(oldHead),
+          ancestors = tail(ascent),
+          parentNode;
+
+      if( ancestors ) {
+         parentNode = nodeOf(head(ancestors));
+         parentNode[key] = newNode;
+      }
    });
+
+   oboeBus(NODE_DROP).on(function() {
+
+      var oldHead = head(ascent),
+          key = keyOf(oldHead),
+          ancestors = tail(ascent),
+          parentNode;
+
+      if( ancestors ) {
+         parentNode = nodeOf(head(ancestors));
+ 
+         delete parentNode[key];
+      }
+   });
+
+   oboeBus(ABORTING).on(function(){
+      
+      for( var eventName in handlers ) {
+         oboeBus(eventName).un(listenerId);
+      }
+   });   
 }
 
-function httpTransport(){
-   return require('http');
-}
+var httpTransport = functor(require('http-https'));
 
 /**
  * A wrapper around the browser XmlHttpRequest object that raises an 
@@ -524,7 +1100,7 @@ function httpTransport(){
  * should be raised, allowing progressive interpretation of the response.
  *      
  * @param {Function} oboeBus an event bus local to this Oboe instance
- * @param {XMLHttpRequest} http the http implementation to use as the transport. Under normal
+ * @param {XMLHttpRequest} transport the http implementation to use as the transport. Under normal
  *          operation, will have been created using httpTransport() above
  *          and therefore be Node's http
  *          but for tests a stub may be provided instead.
@@ -534,20 +1110,31 @@ function httpTransport(){
  *                      Only valid if method is POST or PUT.
  * @param {Object} [headers] the http request headers to send                       
  */  
-function streamingHttp(oboeBus, http, method, contentSource, data, headers) {
+function streamingHttp(oboeBus, transport, method, contentSource, data, headers) {
    "use strict";
+   
+   /* receiving data after calling .abort on Node's http has been observed in the
+      wild. Keep aborted as state so that if the request has been aborted we
+      can ignore new data from that point on */
+   var aborted = false;
 
    function readStreamToEventBus(readableStream) {
          
       // use stream in flowing mode   
       readableStream.on('data', function (chunk) {
-                                             
-         oboeBus(STREAM_DATA).emit( chunk.toString() );
+
+         // avoid reading the stream after aborting the request
+         if( !aborted ) {
+            oboeBus(STREAM_DATA).emit(chunk.toString());
+         }
       });
       
       readableStream.on('end', function() {
-               
-         oboeBus( STREAM_END ).emit();
+
+         // avoid reading the stream after aborting the request
+         if( !aborted ) {
+            oboeBus(STREAM_END).emit();
+         }
       });
    }
    
@@ -565,28 +1152,40 @@ function streamingHttp(oboeBus, http, method, contentSource, data, headers) {
       });
    }
    
-   function fetchHttpUrl( url ) {
-      if( !contentSource.match(/http:\/\//) ) {
-         contentSource = 'http://' + contentSource;
-      }                           
-                           
-      var parsedUrl = require('url').parse(contentSource); 
-   
-      var req = http.request({
+   function openUrlAsStream( url ) {
+      
+      var parsedUrl = require('url').parse(url);
+           
+      return transport.request({
          hostname: parsedUrl.hostname,
          port: parsedUrl.port, 
-         path: parsedUrl.pathname,
+         path: parsedUrl.path,
          method: method,
-         headers: headers 
+         headers: headers,
+         protocol: parsedUrl.protocol
       });
+   }
+   
+   function fetchUrl() {
+      if( !contentSource.match(/https?:\/\//) ) {
+         throw new Error(
+            'Supported protocols when passing a URL into Oboe are http and https. ' +
+            'If you wish to use another protocol, please pass a ReadableStream ' +
+            '(http://nodejs.org/api/stream.html#stream_class_stream_readable) like ' + 
+            'oboe(fs.createReadStream("my_file")). I was given the URL: ' +
+            contentSource
+         );
+      }
+      
+      var req = openUrlAsStream(contentSource);
       
       req.on('response', function(res){
          var statusCode = res.statusCode,
-             sucessful = String(statusCode)[0] == 2;
+             successful = String(statusCode)[0] == 2;
                                                    
-         oboeBus(HTTP_START).emit( res.statusCode, res.headers);                                
+         oboeBus(HTTP_START).emit( res.statusCode, res.headers);
                                 
-         if( sucessful ) {          
+         if( successful ) {          
                
             readStreamToEventBus(res)
             
@@ -605,7 +1204,8 @@ function streamingHttp(oboeBus, http, method, contentSource, data, headers) {
          );
       });
       
-      oboeBus(ABORTING).on( function(){              
+      oboeBus(ABORTING).on( function(){
+         aborted = true;
          req.abort();
       });
          
@@ -617,7 +1217,7 @@ function streamingHttp(oboeBus, http, method, contentSource, data, headers) {
    }
    
    if( isString(contentSource) ) {
-      fetchHttpUrl(contentSource);
+      fetchUrl(contentSource);
    } else {
       // contentsource is a stream
       readStreamToEventBus(contentSource);   
@@ -761,7 +1361,7 @@ var nodeOf = attr('node');
  * to the low-level events from Clarinet and emits higher-level ones.
  *  
  * The building up is stateless so to track a JSON file
- * clarinetListenerAdaptor.js is required to store the ascent state
+ * ascentManager.js is required to store the ascent state
  * between calls.
  */
 
@@ -789,9 +1389,10 @@ var ROOT_PATH = {};
  */ 
 function incrementalContentBuilder( oboeBus ) {
 
-   var emitNodeFound = oboeBus(NODE_FOUND).emit,
-       emitRootFound = oboeBus(ROOT_FOUND).emit,
-       emitPathFound = oboeBus(PATH_FOUND).emit;
+   var emitNodeOpened = oboeBus(NODE_OPENED).emit,
+       emitNodeClosed = oboeBus(NODE_CLOSED).emit,
+       emitRootOpened = oboeBus(ROOT_PATH_FOUND).emit,
+       emitRootClosed = oboeBus(ROOT_NODE_FOUND).emit;
 
    function arrayIndicesAreKeys( possiblyInconsistentAscent, newDeepestNode) {
    
@@ -805,7 +1406,7 @@ function incrementalContentBuilder( oboeBus ) {
       
       return      isOfType( Array, parentNode)
                ?
-                  pathFound(  possiblyInconsistentAscent, 
+                  keyFound(  possiblyInconsistentAscent, 
                               len(parentNode), 
                               newDeepestNode
                   )
@@ -815,13 +1416,13 @@ function incrementalContentBuilder( oboeBus ) {
                ;
    }
                  
-   function nodeFound( ascent, newDeepestNode ) {
+   function nodeOpened( ascent, newDeepestNode ) {
       
       if( !ascent ) {
          // we discovered the root node,         
-         emitRootFound( newDeepestNode);
+         emitRootOpened( newDeepestNode);
                     
-         return pathFound( ascent, ROOT_PATH, newDeepestNode);         
+         return keyFound( ascent, ROOT_PATH, newDeepestNode);         
       }
 
       // we discovered a non-root node
@@ -864,7 +1465,7 @@ function incrementalContentBuilder( oboeBus ) {
     *    usually this won't be known so can be undefined. Can't use null 
     *    to represent unknown because null is a valid value in JSON
     **/  
-   function pathFound(ascent, newDeepestName, maybeNewDeepestNode) {
+   function keyFound(ascent, newDeepestName, maybeNewDeepestNode) {
 
       if( ascent ) { // if not root
       
@@ -879,70 +1480,32 @@ function incrementalContentBuilder( oboeBus ) {
                                  ascent
                               );
 
-      emitPathFound( ascentWithNewPath);
+      emitNodeOpened( ascentWithNewPath);
  
       return ascentWithNewPath;
    }
 
 
    /**
-    * For when the current node ends
+    * For when the current node ends.
     */
-   function nodeFinished( ascent ) {
+   function nodeClosed( ascent ) {
 
-      emitNodeFound( ascent);
-                          
-      // pop the complete node and its path off the list:                                    
-      return tail( ascent);
+      emitNodeClosed( ascent);
+       
+      return tail( ascent) ||
+             // If there are no nodes left in the ascent the root node
+             // just closed. Emit a special event for this: 
+             emitRootClosed(nodeOf(head(ascent)));
    }      
-                 
-   return { 
 
-      openobject : function (ascent, firstKey) {
-
-         var ascentAfterNodeFound = nodeFound(ascent, {});         
-
-         /* It is a perculiarity of Clarinet that for non-empty objects it
-            gives the first key with the openobject event instead of
-            in a subsequent key event.
-                      
-            firstKey could be the empty string in a JSON object like 
-            {'':'foo'} which is technically valid.
-            
-            So can't check with !firstKey, have to see if has any 
-            defined value. */
-         return defined(firstKey)
-         ?          
-            /* We know the first key of the newly parsed object. Notify that 
-               path has been found but don't put firstKey permanently onto 
-               pathList yet because we haven't identified what is at that key 
-               yet. Give null as the value because we haven't seen that far 
-               into the json yet */
-            pathFound(ascentAfterNodeFound, firstKey)
-         :
-            ascentAfterNodeFound
-         ;
-      },
-    
-      openarray: function (ascent) {
-         return nodeFound(ascent, []);
-      },
-
-      // called by Clarinet when keys are found in objects               
-      key: pathFound,
-      
-      /* Emitted by Clarinet when primitive values are found, ie Strings,
-         Numbers, and null.
-         Because these are always leaves in the JSON, we find and finish the 
-         node in one step, expressed as functional composition: */
-      value: compose2( nodeFinished, nodeFound ),
-      
-      // we make no distinction in how we handle object and arrays closing.
-      // For both, interpret as the end of the current node.
-      closeobject: nodeFinished,
-      closearray: nodeFinished
-   };
+   var contentBuilderHandlers = {};
+   contentBuilderHandlers[SAX_VALUE_OPEN] = nodeOpened;
+   contentBuilderHandlers[SAX_VALUE_CLOSE] = nodeClosed;
+   contentBuilderHandlers[SAX_KEY] = keyFound;
+   return contentBuilderHandlers;
 }
+
 /**
  * The jsonPath evaluator compiler used for Oboe.js. 
  * 
@@ -1096,26 +1659,18 @@ var jsonPathCompiler = jsonPathSyntax(function (pathNodeSyntax,
           // the match has succeeded. Ie, we might write ..foo or !..foo
           // and both should match identically.
           terminalCaseWhenArrivingAtRoot = rootExpr(),
-          terminalCaseWhenPreviousExpressionIsSatisfied = previousExpr, 
-          recursiveCase = skip1(skipManyInner),
-          
+          terminalCaseWhenPreviousExpressionIsSatisfied = previousExpr,
+          recursiveCase = skip1(function(ascent) {
+             return cases(ascent);
+          }),
+
           cases = lazyUnion(
                      terminalCaseWhenArrivingAtRoot
                   ,  terminalCaseWhenPreviousExpressionIsSatisfied
-                  ,  recursiveCase
-                  );                        
-            
-      function skipManyInner(ascent) {
+                  ,  recursiveCase  
+                  );
       
-         if( !ascent ) {
-            // have gone past the start, not a match:         
-            return false;
-         }      
-                                                        
-         return cases(ascent);
-      }
-      
-      return skipManyInner;
+      return cases;
    }      
    
    /**
@@ -1473,6 +2028,7 @@ function pubSub(){
          
    return pubSubInstance;
 }
+
 /**
  * This file declares some constants to use as names for event types.
  */
@@ -1481,17 +2037,30 @@ var // the events which are never exported are kept as
     // the smallest possible representation, in numbers:
     _S = 1,
 
-    // fired whenever a node is found in the JSON:
-    NODE_FOUND    = _S++,
-    // fired whenever a path is found in the JSON:      
-    PATH_FOUND    = _S++,   
-             
-    FAIL_EVENT    = 'fail',    
-    ROOT_FOUND    = _S++,    
-    HTTP_START    = 'start',
-    STREAM_DATA   = 'content',
-    STREAM_END    = _S++,
-    ABORTING      = _S++;
+    // fired whenever a new node starts in the JSON stream:
+    NODE_OPENED     = _S++,
+
+    // fired whenever a node closes in the JSON stream:
+    NODE_CLOSED     = _S++,
+
+    // called if a .node callback returns a value - 
+    NODE_SWAP       = _S++,
+    NODE_DROP       = _S++,
+
+    FAIL_EVENT      = 'fail',
+   
+    ROOT_NODE_FOUND = _S++,
+    ROOT_PATH_FOUND = _S++,
+   
+    HTTP_START      = 'start',
+    STREAM_DATA     = 'data',
+    STREAM_END      = 'end',
+    ABORTING        = _S++,
+
+    // SAX events butchered from Clarinet
+    SAX_KEY          = _S++,
+    SAX_VALUE_OPEN   = _S++,
+    SAX_VALUE_CLOSE  = _S++;
     
 function errorReport(statusCode, body, error) {
    try{
@@ -1505,6 +2074,7 @@ function errorReport(statusCode, body, error) {
       thrown:error
    };
 }    
+
 /** 
  *  The pattern adaptor listens for newListener and removeListener
  *  events. When patterns are added or removed it compiles the JSONPath
@@ -1517,8 +2087,8 @@ function errorReport(statusCode, body, error) {
 function patternAdapter(oboeBus, jsonPathCompiler) {
 
    var predicateEventMap = {
-      node:oboeBus(NODE_FOUND)
-   ,  path:oboeBus(PATH_FOUND)
+      node:oboeBus(NODE_CLOSED)
+   ,  path:oboeBus(NODE_OPENED)
    };
      
    function emitMatchingNode(emitMatch, node, ascent) {
@@ -1542,14 +2112,14 @@ function patternAdapter(oboeBus, jsonPathCompiler) {
    }
 
    /* 
-    * Set up the catching of events such as NODE_FOUND and PATH_FOUND and, if 
+    * Set up the catching of events such as NODE_CLOSED and NODE_OPENED and, if 
     * matching the specified pattern, propagate to pattern-match events such as 
     * oboeBus('node:!')
     * 
     * 
     * 
     * @param {Function} predicateEvent 
-    *          either oboeBus(NODE_FOUND) or oboeBus(PATH_FOUND).
+    *          either oboeBus(NODE_CLOSED) or oboeBus(NODE_OPENED).
     * @param {Function} compiledJsonPath          
     */
    function addUnderlyingListener( fullEventName, predicateEvent, compiledJsonPath ){
@@ -1625,11 +2195,13 @@ function patternAdapter(oboeBus, jsonPathCompiler) {
  *    - listeners for various events to be added and removed
  *    - the http response header/headers to be read
  */
-function instanceApi(oboeBus){
+function instanceApi(oboeBus, contentSource){
 
    var oboeApi,
        fullyQualifiedNamePattern = /^(node|path):./,
-       rootNodeFinishedEvent = oboeBus('node:!'),
+       rootNodeFinishedEvent = oboeBus(ROOT_NODE_FOUND),
+       emitNodeDrop = oboeBus(NODE_DROP).emit,
+       emitNodeSwap = oboeBus(NODE_SWAP).emit,
 
        /**
         * Add any kind of listener that the instance api exposes 
@@ -1709,7 +2281,12 @@ function instanceApi(oboeBus){
     * Add a callback where, if .forget() is called during the callback's
     * execution, the callback will be de-registered
     */
-   function addForgettableCallback(event, callback) {
+   function addForgettableCallback(event, callback, listenerId) {
+      
+      // listnerId is optional and if not given, the original
+      // callback will be used
+      listenerId = listenerId || callback;
+      
       var safeCallback = protectedCallback(callback);
    
       event.on( function() {
@@ -1724,18 +2301,22 @@ function instanceApi(oboeBus){
                
          delete oboeApi.forget;
          
-         if( discard ) {          
-            event.un(callback);
+         if( discard ) {
+            event.un(listenerId);
          }
-      }, callback)
+      }, listenerId);
       
       return oboeApi; // chaining         
-   }  
-         
+   }
+      
+   /** 
+    *  wrap a callback so that if it throws, Oboe.js doesn't crash but instead
+    *  handles it like a normal error
+    */
    function protectedCallback( callback ) {
       return function() {
          try{      
-            callback.apply(oboeApi, arguments);   
+            return callback.apply(oboeApi, arguments);   
          }catch(e)  {
          
             // An error occured during the callback, publish it on the event bus 
@@ -1752,43 +2333,70 @@ function instanceApi(oboeBus){
     */      
    function fullyQualifiedPatternMatchEvent(type, pattern) {
       return oboeBus(type + ':' + pattern);
-   }      
+   }
+
+   function wrapCallbackToSwapNodeIfSomethingReturned( callback ) {
+      return function() {
+         var returnValueFromCallback = callback.apply(this, arguments);
+
+         if( defined(returnValueFromCallback) ) {
+            
+            if( returnValueFromCallback == oboe.drop ) {
+               emitNodeDrop();
+            } else {
+               emitNodeSwap(returnValueFromCallback);
+            }
+         }
+      }
+   }
+
+   function addSingleNodeOrPathListener(eventId, pattern, callback) {
+
+      var effectiveCallback;
+
+      if( eventId == 'node' ) {
+         effectiveCallback = wrapCallbackToSwapNodeIfSomethingReturned(callback);
+      } else {
+         effectiveCallback = callback;
+      }
       
+      addForgettableCallback(
+         fullyQualifiedPatternMatchEvent(eventId, pattern),
+         effectiveCallback,
+         callback
+      );
+   }
+
    /**
     * Add several listeners at a time, from a map
     */
-   function addListenersMap(eventId, listenerMap) {
+   function addMultipleNodeOrPathListeners(eventId, listenerMap) {
    
       for( var pattern in listenerMap ) {
-         addForgettableCallback(
-            fullyQualifiedPatternMatchEvent(eventId, pattern), 
-            listenerMap[pattern]
-         );
+         addSingleNodeOrPathListener(eventId, pattern, listenerMap[pattern]);
       }
    }    
-      
+         
    /**
     * implementation behind .onPath() and .onNode()
     */       
    function addNodeOrPathListenerApi( eventId, jsonPathOrListenerMap, callback ){
-   
+         
       if( isString(jsonPathOrListenerMap) ) {
-         addForgettableCallback(
-            fullyQualifiedPatternMatchEvent(eventId, jsonPathOrListenerMap),
-            callback
-         );
+         addSingleNodeOrPathListener(eventId, jsonPathOrListenerMap, callback);
+
       } else {
-         addListenersMap(eventId, jsonPathOrListenerMap);
+         addMultipleNodeOrPathListeners(eventId, jsonPathOrListenerMap);
       }
       
       return oboeApi; // chaining
    }
       
    
-   // some interface methods are only filled in after we recieve
+   // some interface methods are only filled in after we receive
    // values and are noops before that:          
-   oboeBus(ROOT_FOUND).on( function(root) {
-      oboeApi.root = functor(root);   
+   oboeBus(ROOT_PATH_FOUND).on( function(rootNode) {
+      oboeApi.root = functor(rootNode);   
    });
 
    /**
@@ -1829,77 +2437,22 @@ function instanceApi(oboeBus){
       
       // initially return nothing for header and root
       header         : noop,
-      root           : noop
+      root           : noop,
+      
+      source         : contentSource
    };   
 }
     
-/**
- * This file implements a light-touch central controller for an instance 
- * of Oboe which provides the methods used for interacting with the instance 
- * from the calling app.
- */
- 
- 
-function instanceController(  oboeBus, 
-                              clarinetParser, contentBuilderHandlers) {
-                                
-   oboeBus(STREAM_DATA).on( clarinetParser.write.bind(clarinetParser));      
-   
-   /* At the end of the http content close the clarinet parser.
-      This will provide an error if the total content provided was not 
-      valid json, ie if not all arrays, objects and Strings closed properly */
-   oboeBus(STREAM_END).on( clarinetParser.close.bind(clarinetParser));
-   
 
-   /* If we abort this Oboe's request stop listening to the clarinet parser. 
-      This prevents more tokens being found after we abort in the case where 
-      we aborted during processing of an already filled buffer. */
-   oboeBus(ABORTING).on( function() {
-      clarinetListenerAdaptor(clarinetParser, {});
-   });   
-
-   clarinetListenerAdaptor(clarinetParser, contentBuilderHandlers);
-  
-   // react to errors by putting them on the event bus
-   clarinetParser.onerror = function(e) {          
-      oboeBus(FAIL_EVENT).emit(          
-         errorReport(undefined, undefined, e)
-      );
-      
-      // note: don't close clarinet here because if it was not expecting
-      // end of the json it will throw an error
-   };   
-}
 /**
  * This file sits just behind the API which is used to attain a new
  * Oboe instance. It creates the new components that are required
  * and introduces them to each other.
  */
 
-function wire (httpMethodName, contentSource, body, headers){
+function wire (httpMethodName, contentSource, body, headers, withCredentials){
 
    var oboeBus = pubSub();
-
-   headers = headers ? 
-                       // Shallow-clone the headers array. This allows it to be
-                       // modified without side effects to the caller. We don't
-                       // want to change objects that the user passes in.
-                       JSON.parse(JSON.stringify(headers)) 
-                     : {};
-   
-   if( body ) {
-      if( !isString(body) ) {
-         
-         // If the body is not a string, stringify it. This allows objects to
-         // be given which will be sent as JSON.
-         body = JSON.stringify(body);
-         
-         // Default Content-Type to JSON unless given otherwise.
-         headers['Content-Type'] = headers['Content-Type'] || 'application/json';
-      }
-   } else {
-      body = null;
-   }
    
    // Wire the input stream in if we are given a content source.
    // This will usually be the case. If not, the instance created
@@ -1912,69 +2465,113 @@ function wire (httpMethodName, contentSource, body, headers){
                      httpMethodName,
                      contentSource,
                      body,
-                     headers 
+                     headers,
+                     withCredentials
       );
-   }                              
-     
-   instanceController( 
-               oboeBus, 
-               clarinet.parser(), 
-               incrementalContentBuilder(oboeBus) 
-   );
+   }
+
+   clarinet(oboeBus);
+
+   ascentManager(oboeBus, incrementalContentBuilder(oboeBus));
       
    patternAdapter(oboeBus, jsonPathCompiler);      
       
-   return new instanceApi(oboeBus);
+   return instanceApi(oboeBus, contentSource);
 }
 
-// export public API
-function oboe(arg1, arg2) {
+function applyDefaults( passthrough, url, httpMethodName, body, headers, withCredentials, cached ){
 
-   if( arg1 ) {
-      if (arg1.url) {
-   
-         // method signature is:
-         //    oboe({method:m, url:u, body:b, headers:{...}})
-   
-         return wire(
-            (arg1.method || 'GET'),
-            url(arg1.url, arg1.cached),
-            arg1.body,
-            arg1.headers
-         );
-      } else {
-   
-         //  simple version for GETs. Signature is:
-         //    oboe( url )            
-         //                                
-         return wire(
-            'GET',
-            arg1, // url
-            arg2  // body. Deprecated, use {url:u, body:b} instead
-         );
+   headers = headers ?
+      // Shallow-clone the headers array. This allows it to be
+      // modified without side effects to the caller. We don't
+      // want to change objects that the user passes in.
+      JSON.parse(JSON.stringify(headers))
+      : {};
+
+   if( body ) {
+      if( !isString(body) ) {
+
+         // If the body is not a string, stringify it. This allows objects to
+         // be given which will be sent as JSON.
+         body = JSON.stringify(body);
+
+         // Default Content-Type to JSON unless given otherwise.
+         headers['Content-Type'] = headers['Content-Type'] || 'application/json';
       }
    } else {
-      // wire up a no-AJAX Oboe. Will have to have content 
-      // fed in externally and using .emit.
-      return wire();
+      body = null;
    }
-   
+
    // support cache busting like jQuery.ajax({cache:false})
-   function url(baseUrl, cached) {
-     
+   function modifiedUrl(baseUrl, cached) {
+
       if( cached === false ) {
-           
+
          if( baseUrl.indexOf('?') == -1 ) {
             baseUrl += '?';
          } else {
             baseUrl += '&';
          }
-         
+
          baseUrl += '_=' + new Date().getTime();
       }
       return baseUrl;
    }
+
+   return passthrough( httpMethodName || 'GET', modifiedUrl(url, cached), body, headers, withCredentials || false );
 }
 
+// export public API
+function oboe(arg1) {
 
-;return oboe;})();
+   var nodeStreamMethodNames = list('resume', 'pause', 'pipe', 'unpipe', 'unshift'),
+       isStream = partialComplete(
+                     hasAllProperties
+                  ,  nodeStreamMethodNames
+                  );
+   
+   if( arg1 ) {
+      if (isStream(arg1) || isString(arg1)) {
+
+         //  simple version for GETs. Signature is:
+         //    oboe( url )
+         //  or, under node:
+         //    oboe( readableStream )
+         return applyDefaults(
+            wire,
+            arg1 // url
+         );
+
+      } else {
+
+         // method signature is:
+         //    oboe({method:m, url:u, body:b, headers:{...}})
+
+         return applyDefaults(
+            wire,
+            arg1.url,
+            arg1.method,
+            arg1.body,
+            arg1.headers,
+            arg1.withCredentials,
+            arg1.cached
+         );
+         
+      }
+   } else {
+      // wire up a no-AJAX, no-stream Oboe. Will have to have content 
+      // fed in externally and using .emit.
+      return wire();
+   }
+}
+
+/* oboe.drop is a special value. If a node callback returns this value the
+   parsed node is deleted from the JSON
+ */
+oboe.drop = function() {
+   return oboe.drop;
+};
+
+
+   return oboe;
+})();

@@ -4,7 +4,7 @@
  * to the low-level events from Clarinet and emits higher-level ones.
  *  
  * The building up is stateless so to track a JSON file
- * clarinetListenerAdaptor.js is required to store the ascent state
+ * ascentManager.js is required to store the ascent state
  * between calls.
  */
 
@@ -32,9 +32,10 @@ var ROOT_PATH = {};
  */ 
 function incrementalContentBuilder( oboeBus ) {
 
-   var emitNodeFound = oboeBus(NODE_FOUND).emit,
-       emitRootFound = oboeBus(ROOT_FOUND).emit,
-       emitPathFound = oboeBus(PATH_FOUND).emit;
+   var emitNodeOpened = oboeBus(NODE_OPENED).emit,
+       emitNodeClosed = oboeBus(NODE_CLOSED).emit,
+       emitRootOpened = oboeBus(ROOT_PATH_FOUND).emit,
+       emitRootClosed = oboeBus(ROOT_NODE_FOUND).emit;
 
    function arrayIndicesAreKeys( possiblyInconsistentAscent, newDeepestNode) {
    
@@ -48,7 +49,7 @@ function incrementalContentBuilder( oboeBus ) {
       
       return      isOfType( Array, parentNode)
                ?
-                  pathFound(  possiblyInconsistentAscent, 
+                  keyFound(  possiblyInconsistentAscent, 
                               len(parentNode), 
                               newDeepestNode
                   )
@@ -58,13 +59,13 @@ function incrementalContentBuilder( oboeBus ) {
                ;
    }
                  
-   function nodeFound( ascent, newDeepestNode ) {
+   function nodeOpened( ascent, newDeepestNode ) {
       
       if( !ascent ) {
          // we discovered the root node,         
-         emitRootFound( newDeepestNode);
+         emitRootOpened( newDeepestNode);
                     
-         return pathFound( ascent, ROOT_PATH, newDeepestNode);         
+         return keyFound( ascent, ROOT_PATH, newDeepestNode);         
       }
 
       // we discovered a non-root node
@@ -107,7 +108,7 @@ function incrementalContentBuilder( oboeBus ) {
     *    usually this won't be known so can be undefined. Can't use null 
     *    to represent unknown because null is a valid value in JSON
     **/  
-   function pathFound(ascent, newDeepestName, maybeNewDeepestNode) {
+   function keyFound(ascent, newDeepestName, maybeNewDeepestNode) {
 
       if( ascent ) { // if not root
       
@@ -122,67 +123,28 @@ function incrementalContentBuilder( oboeBus ) {
                                  ascent
                               );
 
-      emitPathFound( ascentWithNewPath);
+      emitNodeOpened( ascentWithNewPath);
  
       return ascentWithNewPath;
    }
 
 
    /**
-    * For when the current node ends
+    * For when the current node ends.
     */
-   function nodeFinished( ascent ) {
+   function nodeClosed( ascent ) {
 
-      emitNodeFound( ascent);
-                          
-      // pop the complete node and its path off the list:                                    
-      return tail( ascent);
+      emitNodeClosed( ascent);
+       
+      return tail( ascent) ||
+             // If there are no nodes left in the ascent the root node
+             // just closed. Emit a special event for this: 
+             emitRootClosed(nodeOf(head(ascent)));
    }      
-                 
-   return { 
 
-      openobject : function (ascent, firstKey) {
-
-         var ascentAfterNodeFound = nodeFound(ascent, {});         
-
-         /* It is a perculiarity of Clarinet that for non-empty objects it
-            gives the first key with the openobject event instead of
-            in a subsequent key event.
-                      
-            firstKey could be the empty string in a JSON object like 
-            {'':'foo'} which is technically valid.
-            
-            So can't check with !firstKey, have to see if has any 
-            defined value. */
-         return defined(firstKey)
-         ?          
-            /* We know the first key of the newly parsed object. Notify that 
-               path has been found but don't put firstKey permanently onto 
-               pathList yet because we haven't identified what is at that key 
-               yet. Give null as the value because we haven't seen that far 
-               into the json yet */
-            pathFound(ascentAfterNodeFound, firstKey)
-         :
-            ascentAfterNodeFound
-         ;
-      },
-    
-      openarray: function (ascent) {
-         return nodeFound(ascent, []);
-      },
-
-      // called by Clarinet when keys are found in objects               
-      key: pathFound,
-      
-      /* Emitted by Clarinet when primitive values are found, ie Strings,
-         Numbers, and null.
-         Because these are always leaves in the JSON, we find and finish the 
-         node in one step, expressed as functional composition: */
-      value: compose2( nodeFinished, nodeFound ),
-      
-      // we make no distinction in how we handle object and arrays closing.
-      // For both, interpret as the end of the current node.
-      closeobject: nodeFinished,
-      closearray: nodeFinished
-   };
+   var contentBuilderHandlers = {};
+   contentBuilderHandlers[SAX_VALUE_OPEN] = nodeOpened;
+   contentBuilderHandlers[SAX_VALUE_CLOSE] = nodeClosed;
+   contentBuilderHandlers[SAX_KEY] = keyFound;
+   return contentBuilderHandlers;
 }

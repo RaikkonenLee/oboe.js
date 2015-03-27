@@ -18,13 +18,18 @@ function httpTransport(){
  * @param {String} url the url to make a request to
  * @param {String|Null} data some content to be sent with the request.
  *                      Only valid if method is POST or PUT.
- * @param {Object} [headers] the http request headers to send                       
+ * @param {Object} [headers] the http request headers to send
+ * @param {boolean} withCredentials the XHR withCredentials property will be
+ *    set to this value
  */  
-function streamingHttp(oboeBus, xhr, method, url, data, headers) {
+function streamingHttp(oboeBus, xhr, method, url, data, headers, withCredentials) {
            
+   "use strict";
+   
    var emitStreamData = oboeBus(STREAM_DATA).emit,
        emitFail       = oboeBus(FAIL_EVENT).emit,
-       numberOfCharsAlreadyGivenToCallback = 0;      
+       numberOfCharsAlreadyGivenToCallback = 0,
+       stillToSendStartEvent = true;
 
    // When an ABORTING message is put on the event bus abort 
    // the ajax request         
@@ -65,19 +70,30 @@ function streamingHttp(oboeBus, xhr, method, url, data, headers) {
    if('onprogress' in xhr){  // detect browser support for progressive delivery
       xhr.onprogress = handleProgress;
    }
-   
+      
    xhr.onreadystatechange = function() {
+
+      function sendStartIfNotAlready() {
+         // Internet Explorer is very unreliable as to when xhr.status etc can
+         // be read so has to be protected with try/catch and tried again on 
+         // the next readyState if it fails
+         try{
+            stillToSendStartEvent && oboeBus( HTTP_START ).emit(
+               xhr.status,
+               parseResponseHeaders(xhr.getAllResponseHeaders()) );
+            stillToSendStartEvent = false;
+         } catch(e){/* do nothing, will try again on next readyState*/}
+      }
       
       switch( xhr.readyState ) {
                
-         case 2:       
-         
-            oboeBus( HTTP_START ).emit( 
-               xhr.status,
-               parseResponseHeaders(xhr.getAllResponseHeaders()) );
-            return;
+         case 2: // HEADERS_RECEIVED
+         case 3: // LOADING
+            return sendStartIfNotAlready();
             
-         case 4:       
+         case 4: // DONE
+            sendStartIfNotAlready(); // if xhr.status hasn't been available yet, it must be NOW, huh IE?
+            
             // is this a 2xx http code?
             var successful = String(xhr.status)[0] == 2;
             
@@ -100,7 +116,7 @@ function streamingHttp(oboeBus, xhr, method, url, data, headers) {
             }
       }
    };
-
+   
    try{
    
       xhr.open(method, url, true);
@@ -108,12 +124,17 @@ function streamingHttp(oboeBus, xhr, method, url, data, headers) {
       for( var headerName in headers ){
          xhr.setRequestHeader(headerName, headers[headerName]);
       }
-      xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+      
+      if( !isCrossOrigin(window.location, parseUrlOrigin(url)) ) {
+         xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+      }
 
+      xhr.withCredentials = withCredentials;
+      
       xhr.send(data);
       
    } catch( e ) {
-
+      
       // To keep a consistent interface with Node, we can't emit an event here.
       // Node's streaming http adaptor receives the error as an asynchronous
       // event rather than as an exception. If we emitted now, the Oboe user

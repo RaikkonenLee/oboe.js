@@ -1,44 +1,40 @@
 describe("incremental content builder", function(){
-
+  
    function IncrementalContentBuilderAsserter(){
      
       var eventBus = pubSub();
       
-      sinon.spy(eventBus(NODE_FOUND), 'emit');
-      sinon.spy(eventBus(NODE_FOUND), 'on');
-      sinon.spy(eventBus(PATH_FOUND), 'emit');
-      sinon.spy(eventBus(PATH_FOUND), 'on');
-      sinon.spy(eventBus(ROOT_FOUND), 'emit');
-      sinon.spy(eventBus(ROOT_FOUND), 'on');            
+      sinon.spy(eventBus(NODE_CLOSED), 'emit');
+      sinon.spy(eventBus(NODE_CLOSED), 'on');
+      sinon.spy(eventBus(NODE_OPENED), 'emit');
+      sinon.spy(eventBus(NODE_OPENED), 'on');
+      sinon.spy(eventBus(ROOT_PATH_FOUND), 'emit');
+      sinon.spy(eventBus(ROOT_PATH_FOUND), 'on');            
       
-      this._clarinetStub = {};
       this._eventBus = eventBus;
       
-      var builderInstance = incrementalContentBuilder(eventBus, this._clarinetStub);
+      var builderInstance = incrementalContentBuilder(eventBus);
       
-      clarinetListenerAdaptor( this._clarinetStub, builderInstance);
+      ascentManager( this._eventBus, builderInstance);
    }
    
-   IncrementalContentBuilderAsserter.prototype.receivingParserEvent = function(fnName /* args */){
+   IncrementalContentBuilderAsserter.prototype.receivingEvent = function(eventName /* args */){
    
       var args = Array.prototype.slice.call(arguments, 1);
    
-      var handlerFn = this._clarinetStub[fnName]; 
-   
-      // to match clarinet behaviour: do nothing if onFoo is falsey
-      handlerFn && handlerFn.apply( undefined, args );
-      
+      this._eventBus(eventName).emit.apply(undefined, args);
+            
       return this;
    };
      
    describe('when root object opens', function() {
       
-      var builder = aContentBuilder().receivingParserEvent('onopenobject'); 
+      var builder = aContentBuilder().receivingEvent(SAX_VALUE_OPEN, {}); 
       
       it('emits correct event', function(){
          expect( builder)
             .toHaveEmitted(         
-               PATH_FOUND
+               NODE_OPENED
             ,  anAscentContaining(  
                   {key:ROOT_PATH, node:{}}
                )
@@ -56,14 +52,14 @@ describe("incremental content builder", function(){
    describe('after key is found in root object', function(){
       // above test, plus some extra events from clarinet
       var builder = aContentBuilder()
-          .receivingParserEvent('onopenobject')
-          .receivingParserEvent('onkey', 'flavour');
+          .receivingEvent(SAX_VALUE_OPEN, {})
+          .receivingEvent(SAX_KEY, 'flavour');
           
       it('emits correct event', function(){
 
          expect( builder )
             .toHaveEmitted(
-                PATH_FOUND
+                NODE_OPENED
              ,  anAscentContaining(  
                    {key:ROOT_PATH, node:{flavour:undefined}}
                 ,  {key:'flavour', node:undefined}
@@ -82,12 +78,13 @@ describe("incremental content builder", function(){
       // above test, plus some extra events from clarinet
 
       var builder = aContentBuilder()
-          .receivingParserEvent('onopenobject', 'flavour');
+          .receivingEvent(SAX_VALUE_OPEN, {}, undefined)
+          .receivingEvent(SAX_KEY,         'flavour');
           
       it('emits correct event', function(){
           
          expect(builder).toHaveEmitted(
-             PATH_FOUND
+             NODE_OPENED
           ,  anAscentContaining(  
                 {key:ROOT_PATH, node:{flavour:undefined}}
              ,  {key:'flavour', node:undefined}
@@ -105,13 +102,14 @@ describe("incremental content builder", function(){
    describe('after value is found for that key', function() {
 
       var builder = aContentBuilder()
-                 .receivingParserEvent('onopenobject')
-                 .receivingParserEvent('onkey'    ,  'flavour')
-                 .receivingParserEvent('onvalue'  ,  'strawberry');
+                 .receivingEvent(SAX_VALUE_OPEN, {})
+                 .receivingEvent(SAX_KEY    ,  'flavour')
+                 .receivingEvent(SAX_VALUE_OPEN  ,  'strawberry')
+                 .receivingEvent(SAX_VALUE_CLOSE);
                  
       it('emits correct event', function(){                 
          expect(builder).toHaveEmitted(
-            NODE_FOUND
+            NODE_CLOSED
          ,  anAscentContaining(  
                {key:ROOT_PATH, node:{flavour:'strawberry'}}
             ,  {key:'flavour', node:'strawberry'}
@@ -129,14 +127,14 @@ describe("incremental content builder", function(){
    describe('emits node found after root object closes', function() {
 
       var builder = aContentBuilder()
-                 .receivingParserEvent('onopenobject')
-                 .receivingParserEvent('onkey', 'flavour')
-                 .receivingParserEvent('onvalue', 'strawberry')
-                 .receivingParserEvent('oncloseobject');
+                 .receivingEvent(SAX_VALUE_OPEN, {})
+                 .receivingEvent(SAX_KEY, 'flavour')
+                 .receivingEvent(SAX_VALUE_OPEN, 'strawberry').receivingEvent(SAX_VALUE_CLOSE)
+                 .receivingEvent(SAX_VALUE_CLOSE);
                  
       it('emits correct event', function(){                 
          expect(builder).toHaveEmitted(
-            NODE_FOUND
+            NODE_CLOSED
          ,  anAscentContaining(  
                {key:ROOT_PATH, node:{flavour:'strawberry'}}
             )      
@@ -153,15 +151,15 @@ describe("incremental content builder", function(){
    describe('first array element', function() {
 
       var builder = aContentBuilder()
-          .receivingParserEvent('onopenobject')
-          .receivingParserEvent('onkey', 'alphabet')
-          .receivingParserEvent('onopenarray')
-          .receivingParserEvent('onvalue', 'a');
+          .receivingEvent(SAX_VALUE_OPEN, {})
+          .receivingEvent(SAX_KEY, 'alphabet')
+          .receivingEvent(SAX_VALUE_OPEN, [])
+          .receivingEvent(SAX_VALUE_OPEN, 'a').receivingEvent(SAX_VALUE_CLOSE);
           
       it('emits path event with numeric paths', function(){
       
          expect(builder).toHaveEmitted(
-            PATH_FOUND
+            NODE_OPENED
             , anAscentContaining(
                   {key:ROOT_PATH,  node:{'alphabet':['a']}    }
                ,  {key:'alphabet', node:['a']                 }
@@ -172,7 +170,7 @@ describe("incremental content builder", function(){
       
       it('emitted node event', function(){
          expect(builder).toHaveEmitted(
-            NODE_FOUND
+            NODE_CLOSED
          ,  anAscentContaining(  
                {key:ROOT_PATH,      node:{'alphabet':['a']} }
             ,  {key:'alphabet',     node:['a']              }
@@ -191,16 +189,16 @@ describe("incremental content builder", function(){
    describe('second array element', function() {
 
       var builder = aContentBuilder()
-          .receivingParserEvent('onopenobject')
-          .receivingParserEvent('onkey', 'alphabet')
-          .receivingParserEvent('onopenarray')
-          .receivingParserEvent('onvalue', 'a')
-          .receivingParserEvent('onvalue', 'b');
+          .receivingEvent(SAX_VALUE_OPEN, {})
+          .receivingEvent(SAX_KEY, 'alphabet')
+          .receivingEvent(SAX_VALUE_OPEN, [])
+          .receivingEvent(SAX_VALUE_OPEN, 'a').receivingEvent(SAX_VALUE_CLOSE)
+          .receivingEvent(SAX_VALUE_OPEN, 'b').receivingEvent(SAX_VALUE_CLOSE);
           
       it('emits events with numeric paths', function(){    
           
          expect(builder).toHaveEmitted(
-            PATH_FOUND
+            NODE_OPENED
             ,  anAscentContaining(
                {key:ROOT_PATH,  node:{'alphabet':['a','b']}   }
                , {key:'alphabet', node:['a','b']                }
@@ -211,7 +209,7 @@ describe("incremental content builder", function(){
       
       it('emitted node event', function(){
          expect(builder).toHaveEmitted(
-            NODE_FOUND
+            NODE_CLOSED
          ,  anAscentContaining(  
                {key:ROOT_PATH,      node:{'alphabet':['a', 'b']} }
             ,  {key:'alphabet',     node:['a','b']               }
@@ -230,14 +228,14 @@ describe("incremental content builder", function(){
    describe('array at root', function() {
 
       var builder = aContentBuilder()
-          .receivingParserEvent('onopenarray')
-          .receivingParserEvent('onvalue', 'a')
-          .receivingParserEvent('onvalue', 'b');
+          .receivingEvent(SAX_VALUE_OPEN, [])
+          .receivingEvent(SAX_VALUE_OPEN, 'a').receivingEvent(SAX_VALUE_CLOSE)
+          .receivingEvent(SAX_VALUE_OPEN, 'b').receivingEvent(SAX_VALUE_CLOSE);
           
       it('emits events with numeric paths', function(){    
           
          expect(builder).toHaveEmitted(
-            PATH_FOUND
+            NODE_OPENED
             ,  anAscentContaining(
                  {key:ROOT_PATH,  node:['a','b']                }
                , {key:1,          node:'b'                      }
@@ -247,7 +245,7 @@ describe("incremental content builder", function(){
       
       it('emitted node event', function(){
          expect(builder).toHaveEmitted(
-            NODE_FOUND
+            NODE_CLOSED
          ,  anAscentContaining(  
                {key:ROOT_PATH,    node:['a','b']                }
             ,  {key:1,            node:'b'                      }
@@ -274,7 +272,7 @@ describe("incremental content builder", function(){
       this.addMatchers({
          toHaveEmittedRootWhichIsNow: function( expectedRootObj ) {
             var asserter = this.actual;
-            var emit = asserter._eventBus(ROOT_FOUND).emit;
+            var emit = asserter._eventBus(ROOT_PATH_FOUND).emit;
 
             return emit.calledWith(expectedRootObj);
          },

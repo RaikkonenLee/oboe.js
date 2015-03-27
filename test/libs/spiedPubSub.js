@@ -5,8 +5,10 @@ function spiedPubSub() {
    function fakedPubSub( eventName ) {
         
       var single = realPubSub(eventName);
-   
-      if( !single.emit.isSpy ) {   
+
+      var alreadySpied = !!single.emit.isSpy;
+      
+      if( !alreadySpied ) {   
          spyOn( single, 'emit' ).andCallThrough();
          spyOn( single, 'on'   ).andCallThrough();
          spyOn( single, 'un'   ).andCallThrough();
@@ -28,17 +30,20 @@ function fakePubSub( eventNames ) {
    var eventsEmitted = [];   
    var eventNamesEmitted = [];
    var eventTypesEmitted = {};
-   var callCount = {};      
+   var callCount = {};
       
    function record(eventName){
       return function() {
+         
+         var args = Array.prototype.slice.apply(arguments);
+         
          eventsEmitted.push({
             type: eventName, 
-            args: arguments
+            args: args
          });
          
          eventNamesEmitted.push(eventName);
-         eventTypesEmitted[eventName].push(arguments);
+         eventTypesEmitted[eventName].push(args);
          callCount[eventName]++;
       }
    }      
@@ -70,8 +75,26 @@ function fakePubSub( eventNames ) {
    
       bus[methodName] = varArgs(function(eventName, parameters){
          apply( parameters, eventTypes[eventName][methodName]);
-      });   
-   })
-      
+      });
+   });
+
    return bus;
-}      
+}
+
+function eventBlackBox( pubsub, eventNames ) {
+   
+   var recording = [];
+   
+   eventNames.forEach(function(eventName){
+      pubsub(eventName).on(function(val, val2){
+         recording.push({
+            type: eventName, 
+            values: arguments,
+            val: val,
+            val2: val
+         });
+      });
+   });
+   
+   return recording;
+}

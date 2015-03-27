@@ -1,325 +1,324 @@
 /* 
    This is a slightly hacked-up browser only version of clarinet 
-   with some features removed to help keep Oboe under 
-   the 5k micro-library limit
+   
+      *  some features removed to help keep browser Oboe under 
+         the 5k micro-library limit
+      *  plug directly into event bus
    
    For the original go here:
       https://github.com/dscape/clarinet
+
+   We receive the events:
+      STREAM_DATA
+      STREAM_END
+      
+   We emit the events:
+      SAX_KEY
+      SAX_VALUE_OPEN
+      SAX_VALUE_CLOSE      
+      FAIL_EVENT      
  */
 
-var clarinet = (function () {
-
-  var clarinet = {
-     parser            : function () { return new CParser();},
-     CParser           : CParser,
-     MAX_BUFFER_LENGTH : 64 * 1024,
-     EVENTS            : [
-         "value"
-       , "string"
-       , "key"
-       , "openobject"
-       , "closeobject"
-       , "openarray"
-       , "closearray"
-       , "error"
-       , "end"
-       , "ready"
-       ]
-  };
-
-  var buffers     = [ "textNode", "numberNode" ]
-    , _n          = 0
-    ;
+function clarinet(eventBus) {
+  "use strict";
+   
+  var 
+      // shortcut some events on the bus
+      emitSaxKey           = eventBus(SAX_KEY).emit,
+      emitValueOpen        = eventBus(SAX_VALUE_OPEN).emit,
+      emitValueClose       = eventBus(SAX_VALUE_CLOSE).emit,
+      emitFail             = eventBus(FAIL_EVENT).emit,
+              
+      MAX_BUFFER_LENGTH = 64 * 1024
+  ,   stringTokenPattern = /[\\"\n]/g
+  ,   _n = 0
   
-  var BEGIN                             = _n++;
-  var VALUE                             = _n++; // general stuff
-  var OPEN_OBJECT                       = _n++; // {
-  var CLOSE_OBJECT                      = _n++; // }
-  var OPEN_ARRAY                        = _n++; // [
-  var CLOSE_ARRAY                       = _n++; // ]
-  var STRING                            = _n++; // ""
-  var OPEN_KEY                          = _n++; // , "a"
-  var CLOSE_KEY                         = _n++; // :
-  var TRUE                              = _n++; // r
-  var TRUE2                             = _n++; // u
-  var TRUE3                             = _n++; // e
-  var FALSE                             = _n++; // a
-  var FALSE2                            = _n++; // l
-  var FALSE3                            = _n++; // s
-  var FALSE4                            = _n++; // e
-  var NULL                              = _n++; // u
-  var NULL2                             = _n++; // l
-  var NULL3                             = _n++; // l
-  var NUMBER_DECIMAL_POINT              = _n++; // .
-  var NUMBER_DIGIT                      = _n;   // [0-9]
+      // states
+  ,   BEGIN                = _n++
+  ,   VALUE                = _n++ // general stuff
+  ,   OPEN_OBJECT          = _n++ // {
+  ,   CLOSE_OBJECT         = _n++ // }
+  ,   OPEN_ARRAY           = _n++ // [
+  ,   CLOSE_ARRAY          = _n++ // ]
+  ,   STRING               = _n++ // ""
+  ,   OPEN_KEY             = _n++ // , "a"
+  ,   CLOSE_KEY            = _n++ // :
+  ,   TRUE                 = _n++ // r
+  ,   TRUE2                = _n++ // u
+  ,   TRUE3                = _n++ // e
+  ,   FALSE                = _n++ // a
+  ,   FALSE2               = _n++ // l
+  ,   FALSE3               = _n++ // s
+  ,   FALSE4               = _n++ // e
+  ,   NULL                 = _n++ // u
+  ,   NULL2                = _n++ // l
+  ,   NULL3                = _n++ // l
+  ,   NUMBER_DECIMAL_POINT = _n++ // .
+  ,   NUMBER_DIGIT         = _n   // [0-9]
 
-  if (!Object.create) {
-    Object.create = function (o) {
-      function f () { this["__proto__"] = o; }
-      f.prototype = o;
-      return new f;
-    };
-  }
+      // setup initial parser values
+  ,   bufferCheckPosition  = MAX_BUFFER_LENGTH
+  ,   latestError                
+  ,   c                    
+  ,   p                    
+  ,   textNode             = ""
+  ,   numberNode           = ""     
+  ,   slashed              = false
+  ,   closed               = false
+  ,   state                = BEGIN
+  ,   stack                = []
+  ,   unicodeS             = null
+  ,   unicodeI             = 0
+  ,   depth                = 0
+  ,   position             = 0
+  ,   column               = 0  //mostly for error reporting
+  ,   line                 = 1
+  ;
 
-  if (!Object.getPrototypeOf) {
-    Object.getPrototypeOf = function (o) {
-      return o["__proto__"];
-    };
-  }
-
-  if (!Object.keys) {
-    Object.keys = function (o) {
-      var a = [];
-      for (var i in o) if (o.hasOwnProperty(i)) a.push(i);
-      return a;
-    };
-  }
-
-  function checkBufferLength (parser) {
-    var maxAllowed = Math.max(clarinet.MAX_BUFFER_LENGTH, 10)
-      , maxActual = 0
-      ;
-    for (var i = 0, l = buffers.length; i < l; i ++) {
-      var len = parser[buffers[i]].length;
-      if (len > maxAllowed) {
-        switch (buffers[i]) {
-          case "text":
-            closeText(parser);
-          break;
-
-          default:
-            error(parser, "Max buffer length exceeded: "+ buffers[i]);
-        }
-      }
-      maxActual = Math.max(maxActual, len);
+  function checkBufferLength () {
+     
+    var maxActual = 0;
+     
+    if (textNode.length > MAX_BUFFER_LENGTH) {
+      emitError("Max buffer length exceeded: textNode");
+      maxActual = Math.max(maxActual, textNode.length);
     }
-    parser.bufferCheckPosition = (clarinet.MAX_BUFFER_LENGTH - maxActual)
-                               + parser.position;
-  }
-
-  function clearBuffers (parser) {
-    for (var i = 0, l = buffers.length; i < l; i ++) {
-      parser[buffers[i]] = "";
+    if (numberNode.length > MAX_BUFFER_LENGTH) {
+      emitError("Max buffer length exceeded: numberNode");
+      maxActual = Math.max(maxActual, numberNode.length);
     }
+     
+    bufferCheckPosition = (MAX_BUFFER_LENGTH - maxActual)
+                               + position;
   }
 
-  var stringTokenPattern = /[\\"\n]/g;
+  eventBus(STREAM_DATA).on(handleData);
 
-  function CParser () {
-    var parser = this;
-    clearBuffers(parser);
-    parser.bufferCheckPosition = clarinet.MAX_BUFFER_LENGTH;
-    parser.q        = parser.c = parser.p = "";
-    parser.closed   = parser.closedRoot = parser.sawRoot = false;
-    parser.tag      = parser.error = null;
-    parser.state    = BEGIN;
-    parser.stack    = [];
-    // mostly just for error reporting
-    parser.position = parser.column = 0;
-    parser.line     = 1;
-    parser.slashed  = false;
-    parser.unicodeI = 0;
-    parser.unicodeS = null;
-    parser.depth    = 0;
-    emit(parser, "onready");
+   /* At the end of the http content close the clarinet 
+    This will provide an error if the total content provided was not 
+    valid json, ie if not all arrays, objects and Strings closed properly */
+  eventBus(STREAM_END).on(handleStreamEnd);   
+
+  function emitError (errorString) {
+     if (textNode) {
+        emitValueOpen(textNode);
+        emitValueClose();
+        textNode = "";
+     }
+
+     latestError = Error(errorString + "\nLn: "+line+
+                                       "\nCol: "+column+
+                                       "\nChr: "+c);
+     
+     emitFail(errorReport(undefined, undefined, latestError));
   }
 
-  CParser.prototype =
-    { end    : function () { end(this); }
-    , write  : write
-    , close  : function () { return this.write(null); }
-    };
+  function handleStreamEnd() {
+    if( state == BEGIN ) {
+      // Handle the case where the stream closes without ever receiving
+      // any input. This isn't an error - response bodies can be blank,
+      // particularly for 204 http responses
+      
+      // Because of how Oboe is currently implemented, we parse a
+      // completely empty stream as containing an empty object.
+      // This is because Oboe's done event is only fired when the
+      // root object of the JSON stream closes.
+      
+      // This should be decoupled and attached instead to the input stream
+      // from the http (or whatever) resource ending.
+      // If this decoupling could happen the SAX parser could simply emit
+      // zero events on a completely empty input.
+      emitValueOpen({});
+      emitValueClose();
 
-  function emit(parser, event, data) {
-    if (parser[event]) parser[event](data);
-  }
-
-  function emitNode(parser, event, data) {
-    closeValue(parser);
-    emit(parser, event, data);
-  }
-
-  function closeValue(parser, event) {
-
-    if (parser.textNode) {
-      emit(parser, (event ? event : "onvalue"), parser.textNode);
+      closed = true;
+      return;
     }
-    parser.textNode = "";
+  
+    if (state !== VALUE || depth !== 0)
+      emitError("Unexpected end");
+ 
+    if (textNode) {
+      emitValueOpen(textNode);
+      emitValueClose();
+      textNode = "";
+    }
+     
+    closed = true;
   }
 
-  function closeNumber(parser) {
-    if (parser.numberNode)
-      emit(parser, "onvalue", parseFloat(parser.numberNode));
-    parser.numberNode = "";
+  function whitespace(c){
+     return c == '\r' || c == '\n' || c == ' ' || c == '\t';
   }
-
-
-  function error (parser, er) {
-    closeValue(parser);
-    er += "\nLine: "+parser.line+
-          "\nColumn: "+parser.column+
-          "\nChar: "+parser.c;
-    er = new Error(er);
-    parser.error = er;
-    emit(parser, "onerror", er);
-    return parser;
-  }
-
-  function end(parser) {
-    if (parser.state !== VALUE || parser.depth !== 0)
-      error(parser, "Unexpected end");
-
-    closeValue(parser);
-    parser.c      = "";
-    parser.closed = true;
-    emit(parser, "onend");
-    CParser.call(parser);
-    return parser;
-  }
-
-  function write (chunk) {
-    var parser = this;
-    
+   
+  function handleData (chunk) {
+         
     // this used to throw the error but inside Oboe we will have already
     // gotten the error when it was emitted. The important thing is to
     // not continue with the parse.
-    if (this.error)
+    if (latestError)
       return;
       
-    if (parser.closed) return error(parser,
-      "Cannot write after close. Assign an onready handler.");
-    if (chunk === null) return end(parser);
-    var i = 0, c = chunk[0], p = parser.p;
+    if (closed) {
+       return emitError("Cannot write after close");
+    }
+
+    var i = 0;
+    c = chunk[0]; 
 
     while (c) {
       p = c;
-      parser.c = c = chunk.charAt(i++);
-      // if chunk doesnt have next, like streaming char by char
-      // this way we need to check if previous is really previous
-      // if not we need to reset to what the parser says is the previous
-      // from buffer
-      if(p !== c ) parser.p = p;
-      else p = parser.p;
-
+      c = chunk[i++];
       if(!c) break;
 
-      parser.position ++;
-      if (c === "\n") {
-        parser.line ++;
-        parser.column = 0;
-      } else parser.column ++;
-      switch (parser.state) {
+      position ++;
+      if (c == "\n") {
+        line ++;
+        column = 0;
+      } else column ++;
+      switch (state) {
 
         case BEGIN:
-          if (c === "{") parser.state = OPEN_OBJECT;
-          else if (c === "[") parser.state = OPEN_ARRAY;
-          else if (c !== '\r' && c !== '\n' && c !== ' ' && c !== '\t')
-            error(parser, "Non-whitespace before {[.");
+          if (c === "{") state = OPEN_OBJECT;
+          else if (c === "[") state = OPEN_ARRAY;
+          else if (!whitespace(c))
+            return emitError("Non-whitespace before {[.");
         continue;
 
         case OPEN_KEY:
         case OPEN_OBJECT:
-          if (c === '\r' || c === '\n' || c === ' ' || c === '\t') continue;
-          if(parser.state === OPEN_KEY) parser.stack.push(CLOSE_KEY);
+          if (whitespace(c)) continue;
+          if(state === OPEN_KEY) stack.push(CLOSE_KEY);
           else {
             if(c === '}') {
-              emit(parser, 'onopenobject');
-              this.depth++;
-              emit(parser, 'oncloseobject');
-              this.depth--;
-              parser.state = parser.stack.pop() || VALUE;
+              emitValueOpen({});
+              emitValueClose();
+              state = stack.pop() || VALUE;
               continue;
-            } else  parser.stack.push(CLOSE_OBJECT);
+            } else  stack.push(CLOSE_OBJECT);
           }
-          if(c === '"') parser.state = STRING;
-          else error(parser, "Malformed object key should start with \"");
+          if(c === '"')
+             state = STRING;
+          else
+             return emitError("Malformed object key should start with \" ");
         continue;
 
         case CLOSE_KEY:
         case CLOSE_OBJECT:
-          if (c === '\r' || c === '\n' || c === ' ' || c === '\t') continue;
+          if (whitespace(c)) continue;
 
           if(c===':') {
-            if(parser.state === CLOSE_OBJECT) {
-              parser.stack.push(CLOSE_OBJECT);
-              closeValue(parser, 'onopenobject');
-              this.depth++;
-            } else closeValue(parser, 'onkey');
-            parser.state  = VALUE;
+            if(state === CLOSE_OBJECT) {
+              stack.push(CLOSE_OBJECT);
+
+               if (textNode) {
+                  // was previously (in upstream Clarinet) one event
+                  //  - object open came with the text of the first
+                  emitValueOpen({});
+                  emitSaxKey(textNode);
+                  textNode = "";
+               }
+               depth++;
+            } else {
+               if (textNode) {
+                  emitSaxKey(textNode);
+                  textNode = "";
+               }
+            }
+             state  = VALUE;
           } else if (c==='}') {
-            emitNode(parser, 'oncloseobject');
-             this.depth--;
-             parser.state = parser.stack.pop() || VALUE;
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             emitValueClose();
+            depth--;
+            state = stack.pop() || VALUE;
           } else if(c===',') {
-            if(parser.state === CLOSE_OBJECT)
-              parser.stack.push(CLOSE_OBJECT);
-            closeValue(parser);
-            parser.state  = OPEN_KEY;
-          } else error(parser, 'Bad object');
+            if(state === CLOSE_OBJECT)
+              stack.push(CLOSE_OBJECT);
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             state  = OPEN_KEY;
+          } else 
+             return emitError('Bad object');
         continue;
 
         case OPEN_ARRAY: // after an array there always a value
         case VALUE:
-          if (c === '\r' || c === '\n' || c === ' ' || c === '\t') continue;
-          if(parser.state===OPEN_ARRAY) {
-            emit(parser, 'onopenarray');
-            this.depth++;             
-            parser.state = VALUE;
+          if (whitespace(c)) continue;
+          if(state===OPEN_ARRAY) {
+            emitValueOpen([]);
+            depth++;             
+            state = VALUE;
             if(c === ']') {
-              emit(parser, 'onclosearray');
-              this.depth--;
-              parser.state = parser.stack.pop() || VALUE;
+              emitValueClose();
+              depth--;
+              state = stack.pop() || VALUE;
               continue;
             } else {
-              parser.stack.push(CLOSE_ARRAY);
+              stack.push(CLOSE_ARRAY);
             }
           }
-               if(c === '"') parser.state = STRING;
-          else if(c === '{') parser.state = OPEN_OBJECT;
-          else if(c === '[') parser.state = OPEN_ARRAY;
-          else if(c === 't') parser.state = TRUE;
-          else if(c === 'f') parser.state = FALSE;
-          else if(c === 'n') parser.state = NULL;
+               if(c === '"') state = STRING;
+          else if(c === '{') state = OPEN_OBJECT;
+          else if(c === '[') state = OPEN_ARRAY;
+          else if(c === 't') state = TRUE;
+          else if(c === 'f') state = FALSE;
+          else if(c === 'n') state = NULL;
           else if(c === '-') { // keep and continue
-            parser.numberNode += c;
+            numberNode += c;
           } else if(c==='0') {
-            parser.numberNode += c;
-            parser.state = NUMBER_DIGIT;
+            numberNode += c;
+            state = NUMBER_DIGIT;
           } else if('123456789'.indexOf(c) !== -1) {
-            parser.numberNode += c;
-            parser.state = NUMBER_DIGIT;
-          } else               error(parser, "Bad value");
+            numberNode += c;
+            state = NUMBER_DIGIT;
+          } else               
+            return emitError("Bad value");
         continue;
 
         case CLOSE_ARRAY:
           if(c===',') {
-            parser.stack.push(CLOSE_ARRAY);
-            closeValue(parser, 'onvalue');
-            parser.state  = VALUE;
+            stack.push(CLOSE_ARRAY);
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             state  = VALUE;
           } else if (c===']') {
-            emitNode(parser, 'onclosearray');
-            this.depth--;
-            parser.state = parser.stack.pop() || VALUE;
-          } else if (c === '\r' || c === '\n' || c === ' ' || c === '\t')
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             emitValueClose();
+            depth--;
+            state = stack.pop() || VALUE;
+          } else if (whitespace(c))
               continue;
-          else error(parser, 'Bad array');
+          else 
+             return emitError('Bad array');
         continue;
 
         case STRING:
           // thanks thejh, this is an about 50% performance improvement.
-          var starti              = i-1
-            , slashed = parser.slashed
-            , unicodeI = parser.unicodeI
-            ;
+          var starti              = i-1;
+           
           STRING_BIGLOOP: while (true) {
 
             // zero means "no unicode active". 1-4 mean "parse some more". end after 4.
             while (unicodeI > 0) {
-              parser.unicodeS += c;
+              unicodeS += c;
               c = chunk.charAt(i++);
               if (unicodeI === 4) {
                 // TODO this might be slow? well, probably not used too often anyway
-                parser.textNode += String.fromCharCode(parseInt(parser.unicodeS, 16));
+                textNode += String.fromCharCode(parseInt(unicodeS, 16));
                 unicodeI = 0;
                 starti = i-1;
               } else {
@@ -329,32 +328,33 @@ var clarinet = (function () {
               if (!c) break STRING_BIGLOOP;
             }
             if (c === '"' && !slashed) {
-              parser.state = parser.stack.pop() || VALUE;
-              parser.textNode += chunk.substring(starti, i-1);
-              if(!parser.textNode) {
-                 emit(parser, "onvalue", "");
+              state = stack.pop() || VALUE;
+              textNode += chunk.substring(starti, i-1);
+              if(!textNode) {
+                 emitValueOpen("");
+                 emitValueClose();
               }
               break;
             }
             if (c === '\\' && !slashed) {
               slashed = true;
-              parser.textNode += chunk.substring(starti, i-1);
-              c = chunk.charAt(i++);
+              textNode += chunk.substring(starti, i-1);
+               c = chunk.charAt(i++);
               if (!c) break;
             }
             if (slashed) {
               slashed = false;
-                   if (c === 'n') { parser.textNode += '\n'; }
-              else if (c === 'r') { parser.textNode += '\r'; }
-              else if (c === 't') { parser.textNode += '\t'; }
-              else if (c === 'f') { parser.textNode += '\f'; }
-              else if (c === 'b') { parser.textNode += '\b'; }
+                   if (c === 'n') { textNode += '\n'; }
+              else if (c === 'r') { textNode += '\r'; }
+              else if (c === 't') { textNode += '\t'; }
+              else if (c === 'f') { textNode += '\f'; }
+              else if (c === 'b') { textNode += '\b'; }
               else if (c === 'u') {
                 // \uxxxx. meh!
                 unicodeI = 1;
-                parser.unicodeS = '';
+                unicodeS = '';
               } else {
-                parser.textNode += c;
+                textNode += c;
               }
               c = chunk.charAt(i++);
               starti = i-1;
@@ -364,125 +364,138 @@ var clarinet = (function () {
 
             stringTokenPattern.lastIndex = i;
             var reResult = stringTokenPattern.exec(chunk);
-            if (reResult === null) {
+            if (!reResult) {
               i = chunk.length+1;
-              parser.textNode += chunk.substring(starti, i-1);
+              textNode += chunk.substring(starti, i-1);
               break;
             }
             i = reResult.index+1;
             c = chunk.charAt(reResult.index);
             if (!c) {
-              parser.textNode += chunk.substring(starti, i-1);
+              textNode += chunk.substring(starti, i-1);
               break;
             }
           }
-          parser.slashed = slashed;
-          parser.unicodeI = unicodeI;
         continue;
 
         case TRUE:
-          if (c==='')  continue; // strange buffers
-          if (c==='r') parser.state = TRUE2;
-          else error(parser, 'Invalid true started with t'+ c);
+          if (!c)  continue; // strange buffers
+          if (c==='r') state = TRUE2;
+          else
+             return emitError( 'Invalid true started with t'+ c);
         continue;
 
         case TRUE2:
-          if (c==='')  continue;
-          if (c==='u') parser.state = TRUE3;
-          else error(parser, 'Invalid true started with tr'+ c);
+          if (!c)  continue;
+          if (c==='u') state = TRUE3;
+          else
+             return emitError('Invalid true started with tr'+ c);
         continue;
 
         case TRUE3:
-          if (c==='') continue;
+          if (!c) continue;
           if(c==='e') {
-            emit(parser, "onvalue", true);
-            parser.state = parser.stack.pop() || VALUE;
-          } else error(parser, 'Invalid true started with tru'+ c);
+            emitValueOpen(true);
+            emitValueClose();
+            state = stack.pop() || VALUE;
+          } else
+             return emitError('Invalid true started with tru'+ c);
         continue;
 
         case FALSE:
-          if (c==='')  continue;
-          if (c==='a') parser.state = FALSE2;
-          else error(parser, 'Invalid false started with f'+ c);
+          if (!c)  continue;
+          if (c==='a') state = FALSE2;
+          else
+             return emitError('Invalid false started with f'+ c);
         continue;
 
         case FALSE2:
-          if (c==='')  continue;
-          if (c==='l') parser.state = FALSE3;
-          else error(parser, 'Invalid false started with fa'+ c);
+          if (!c)  continue;
+          if (c==='l') state = FALSE3;
+          else
+             return emitError('Invalid false started with fa'+ c);
         continue;
 
         case FALSE3:
-          if (c==='')  continue;
-          if (c==='s') parser.state = FALSE4;
-          else error(parser, 'Invalid false started with fal'+ c);
+          if (!c)  continue;
+          if (c==='s') state = FALSE4;
+          else
+             return emitError('Invalid false started with fal'+ c);
         continue;
 
         case FALSE4:
-          if (c==='')  continue;
+          if (!c)  continue;
           if (c==='e') {
-            emit(parser, "onvalue", false);
-            parser.state = parser.stack.pop() || VALUE;
-          } else error(parser, 'Invalid false started with fals'+ c);
+            emitValueOpen(false);
+            emitValueClose();
+            state = stack.pop() || VALUE;
+          } else
+             return emitError('Invalid false started with fals'+ c);
         continue;
 
         case NULL:
-          if (c==='')  continue;
-          if (c==='u') parser.state = NULL2;
-          else error(parser, 'Invalid null started with n'+ c);
+          if (!c)  continue;
+          if (c==='u') state = NULL2;
+          else
+             return emitError('Invalid null started with n'+ c);
         continue;
 
         case NULL2:
-          if (c==='')  continue;
-          if (c==='l') parser.state = NULL3;
-          else error(parser, 'Invalid null started with nu'+ c);
+          if (!c)  continue;
+          if (c==='l') state = NULL3;
+          else
+             return emitError('Invalid null started with nu'+ c);
         continue;
 
         case NULL3:
-          if (c==='') continue;
+          if (!c) continue;
           if(c==='l') {
-            emit(parser, "onvalue", null);
-            parser.state = parser.stack.pop() || VALUE;
-          } else error(parser, 'Invalid null started with nul'+ c);
+            emitValueOpen(null);
+            emitValueClose();
+            state = stack.pop() || VALUE;
+          } else 
+             return emitError('Invalid null started with nul'+ c);
         continue;
 
         case NUMBER_DECIMAL_POINT:
           if(c==='.') {
-            parser.numberNode += c;
-            parser.state       = NUMBER_DIGIT;
-          } else error(parser, 'Leading zero not followed by .');
+            numberNode += c;
+            state       = NUMBER_DIGIT;
+          } else 
+             return emitError('Leading zero not followed by .');
         continue;
 
         case NUMBER_DIGIT:
-          if('0123456789'.indexOf(c) !== -1) parser.numberNode += c;
+          if('0123456789'.indexOf(c) !== -1) numberNode += c;
           else if (c==='.') {
-            if(parser.numberNode.indexOf('.')!==-1)
-              error(parser, 'Invalid number has two dots');
-            parser.numberNode += c;
+            if(numberNode.indexOf('.')!==-1)
+               return emitError('Invalid number has two dots');
+            numberNode += c;
           } else if (c==='e' || c==='E') {
-            if(parser.numberNode.indexOf('e')!==-1 ||
-               parser.numberNode.indexOf('E')!==-1 )
-               error(parser, 'Invalid number has two exponential');
-            parser.numberNode += c;
+            if(numberNode.indexOf('e')!==-1 ||
+               numberNode.indexOf('E')!==-1 )
+               return emitError('Invalid number has two exponential');
+            numberNode += c;
           } else if (c==="+" || c==="-") {
             if(!(p==='e' || p==='E'))
-              error(parser, 'Invalid symbol in number');
-            parser.numberNode += c;
+               return emitError('Invalid symbol in number');
+            numberNode += c;
           } else {
-            closeNumber(parser);
+            if (numberNode) {
+              emitValueOpen(parseFloat(numberNode));
+              emitValueClose();
+              numberNode = "";
+            }
             i--; // go back one
-            parser.state = parser.stack.pop() || VALUE;
+            state = stack.pop() || VALUE;
           }
         continue;
 
         default:
-          error(parser, "Unknown state: " + parser.state);
+          return emitError("Unknown state: " + state);
       }
     }
-    if (parser.position >= parser.bufferCheckPosition)
-      checkBufferLength(parser);
-    return parser;
+    if (position >= bufferCheckPosition)
+      checkBufferLength();
   }
-
-  return clarinet;
-})();
+}

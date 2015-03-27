@@ -20,7 +20,7 @@ describe('streaming xhr integration (real http)', function() {
          null // this is a GET, no data to send
       ); 
       
-      waitUntil(STREAM_END).isFiredOn(oboeBus)
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus)
    })
  
    it('can ajax in a small known file',  function() {
@@ -36,7 +36,7 @@ describe('streaming xhr integration (real http)', function() {
          null // this is a GET, no data to send
       ); 
       
-      waitUntil(STREAM_END).isFiredOn(oboeBus);            
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);            
 
       runs(function(){
          expect(oboeBus).toHaveGivenStreamEventsInCorrectOrder()
@@ -56,7 +56,7 @@ describe('streaming xhr integration (real http)', function() {
          {'specialheader':'specialValue'}
       ); 
       
-      waitUntil(STREAM_END).isFiredOn(oboeBus);            
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);            
 
       runs(function(){
          expect(oboeBus(HTTP_START).emit)
@@ -77,7 +77,7 @@ describe('streaming xhr integration (real http)', function() {
          '/testServer/echoBackHeadersAsHeaders'
       ); 
       
-      waitUntil(STREAM_END).isFiredOn(oboeBus);            
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);            
 
       runs(function(){
          expect(oboeBus(HTTP_START).emit)
@@ -85,8 +85,6 @@ describe('streaming xhr integration (real http)', function() {
                200,
                headerObjectContaining('X-Requested-With', 'XMLHttpRequest')
             );  
-            
-         console.log(oboeBus(HTTP_START).emit.calls[0].args[1]);                   
       });
           
    })   
@@ -105,7 +103,7 @@ describe('streaming xhr integration (real http)', function() {
          {'specialheader':'specialValue'}
       ); 
       
-      waitUntil(STREAM_END).isFiredOn(oboeBus);            
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);            
 
       runs(function(){
          expect(oboeBus).toHaveGivenStreamEventsInCorrectOrder()
@@ -141,7 +139,7 @@ describe('streaming xhr integration (real http)', function() {
          null // this is a GET, no data to send      
       );
       
-      waitUntil(STREAM_END).isFiredOn(oboeBus);            
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);            
 
       runs(function(){
          var parsedResult;
@@ -170,15 +168,87 @@ describe('streaming xhr integration (real http)', function() {
          '/testServer/tenSlowNumbers?withoutMissingAny',
           null // this is a GET, no data to send      
       );
-      
-      waitUntil(STREAM_END).isFiredOn(oboeBus);            
+
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);            
 
       runs(function(){ 
          // as per the name, should have ten numbers in that file:         
          expect(streamedContentPassedTo(oboeBus)).toParseTo([0,1,2,3,4,5,6,7,8,9]);
          expect(oboeBus).toHaveGivenStreamEventsInCorrectOrder()         
       });              
-   }) 
+   })
+
+   it('sends cookies by default',  function() {
+      
+      document.cookie = "token=123456; path=/";
+
+      // in practice, since we're running on an internal network and this is a small file,
+      // we'll probably only get one callback         
+      var oboeBus = fakePubSub(emittedEvents)
+      streamingHttp(
+         oboeBus,
+         httpTransport(),
+         'GET',
+         '/testServer/echoBackHeadersAsBodyJson',
+         null
+      );
+
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);
+
+      runs(function(){
+         var parsedResult = JSON.parse(streamedContentPassedTo(oboeBus));
+         expect(parsedResult.cookie).toMatch('token=123456');
+      });
+
+   })
+
+   it('does not send cookies by default to cross-domain requests',  function() {
+      
+      document.cookie = "deniedToken=123456; path=/";
+
+      // in practice, since we're running on an internal network and this is a small file,
+      // we'll probably only get one callback
+      var oboeBus = fakePubSub(emittedEvents)
+      streamingHttp(
+         oboeBus,
+         httpTransport(),
+         'GET',
+         crossDomainUrl('/echoBackHeadersAsBodyJson'),
+         null
+      );
+
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);
+
+      runs(function(){
+         var parsedResult = JSON.parse(streamedContentPassedTo(oboeBus));
+         expect(parsedResult.cookie).not.toMatch('deniedToken=123456');
+      });
+   })
+
+   it('sends cookies to cross-domain requests if withCredentials is true',  function() {
+
+      document.cookie = "corsToken=123456; path=/";
+
+      // in practice, since we're running on an internal network and this is a small file,
+      // we'll probably only get one callback
+      var oboeBus = fakePubSub(emittedEvents)
+      streamingHttp(
+         oboeBus,
+         httpTransport(),
+         'GET',
+         crossDomainUrl('/echoBackHeadersAsBodyJson'),
+         null, // data
+         null, // headers
+         true  // withCredentials
+      );
+
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);
+
+      runs(function(){
+         var parsedResult = JSON.parse(streamedContentPassedTo(oboeBus));
+         expect(parsedResult.cookie).toMatch('corsToken=123456');
+      });
+   })   
    
    it('can make a post request',  function() {
    
@@ -194,8 +264,8 @@ describe('streaming xhr integration (real http)', function() {
          '/testServer/echoBackBody',
          JSON.stringify(payload)       
       );
-      
-      waitUntil(STREAM_END).isFiredOn(oboeBus);            
+
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);            
  
       runs(function(){
          expect(streamedContentPassedTo(oboeBus)).toParseTo(payload);
@@ -218,8 +288,8 @@ describe('streaming xhr integration (real http)', function() {
          '/testServer/echoBackBody',
          JSON.stringify(payload)       
       );
-      
-      waitUntil(STREAM_END).isFiredOn(oboeBus);            
+
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);            
 
       runs(function(){
          expect(streamedContentPassedTo(oboeBus)).toParseTo(payload);
@@ -231,6 +301,11 @@ describe('streaming xhr integration (real http)', function() {
   
    it('can make a patch request',  function() {
    
+      if( Platform.isInternetExplorer ) {
+         console.warn('PATCH requests don\'t work well under IE. Skipping PATCH integration test');
+         return;
+      }
+      
       var payload = {'thisWill':'bePatched','andShould':'be','echoed':'back'};
    
       // in practice, since we're running on an internal network and this is a small file,
@@ -244,14 +319,14 @@ describe('streaming xhr integration (real http)', function() {
          JSON.stringify(payload)       
       );
       
-      waitUntil(STREAM_END).isFiredOn(oboeBus);            
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);
 
       runs(function(){
          if( streamedContentPassedTo(oboeBus) == '' &&
-             (Platform.isInternetExplorer || Platform.isPhantom) ) {
+             (Platform.isPhantom) ) {
             console.warn( 'this user agent seems not to support giving content' 
                           + ' back for of PATCH requests.'
-                          + ' This happens on PhantomJS and IE < 9');
+                          + ' This happens on PhantomJS');
          } else {         
             expect(streamedContentPassedTo(oboeBus)).toParseTo(payload);
             expect(oboeBus).toHaveGivenStreamEventsInCorrectOrder();
@@ -278,7 +353,7 @@ describe('streaming xhr integration (real http)', function() {
              null // this is a get: no data to send         
          );                     
          
-         waitUntil(STREAM_END).isFiredOn(oboeBus);      
+         waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);      
    
          runs(function(){
                                    
@@ -301,7 +376,7 @@ describe('streaming xhr integration (real http)', function() {
              null // this is a get: no data to send         
          );                     
          
-         waitUntil(STREAM_END).isFiredOn(oboeBus);      
+         waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus);      
    
          runs(function(){
             // some platforms can't help but not work here so warn but don't
@@ -332,7 +407,7 @@ describe('streaming xhr integration (real http)', function() {
          null // this is a GET: no data to send      
       );         
 
-      waitUntil(STREAM_END).isFiredOn(oboeBus)
+      waitUntil(STREAM_END, 'the stream to end').isFiredOn(oboeBus)
       
       runs(function(){
       
@@ -349,13 +424,13 @@ describe('streaming xhr integration (real http)', function() {
       })   
    })
 
-   function waitUntil(event) {
+   function waitUntil(event, messageName) {
       return {isFiredOn: function (eventBus){
          waitsFor(function(){
         
             return !!eventBus(event).emit.calls.length;
         
-            }, 'event ' + event + ' to be fired', ASYNC_TEST_TIMEOUT);
+            }, 'event ' + event + (messageName?'('+messageName+')':'') + ' to be fired', ASYNC_TEST_TIMEOUT);
          }
       }
    }    
@@ -369,16 +444,6 @@ describe('streaming xhr integration (real http)', function() {
    
    beforeEach(function(){
                
-      function prettyPrintEvent(event){
-
-         switch(event) {
-            case     HTTP_START:  return 'start';
-            case     STREAM_DATA: return 'data';
-            case     STREAM_END:  return 'end';
-            default: return 'unknown(' + event + ')' 
-         }                                    
-      }
-            
       this.addMatchers({
          toHaveGivenStreamEventsInCorrectOrder: function(){
             
@@ -388,7 +453,7 @@ describe('streaming xhr integration (real http)', function() {
                return 'events not in correct order. We have: ' +
                         JSON.stringify(
                            eventNames.map(prettyPrintEvent)
-                        )                          
+                        ) + ' but should follow "start", "data"*, "end"'
             };
             
             return   eventNames[0] === HTTP_START

@@ -1,7 +1,10 @@
-// This file is the concatenation of many js files. 
-// See https://github.com/jimhigson/oboe.js for the raw source
+// This file is the concatenation of many js files.
+// See http://github.com/jimhigson/oboe.js for the raw source
+
+// having a local undefined, window, Object etc allows slightly better minification:
 (function  (window, Object, Array, Error, JSON, undefined ) {
-// v1.12.1-7-g08a2134
+
+   // v2.1.0-1-gce46063
 
 /*
 
@@ -116,7 +119,7 @@ function compose2(f1, f2){
  * @param {String} key the property name
  */
 function attr(key) {
-   return new Function('o', 'return o["' + key + '"]' );
+   return function(o) { return o[key]; };
 }
         
 /**
@@ -335,13 +338,18 @@ function hasAllProperties(fieldList, o) {
 function cons(x, xs) {
    
    /* Internally lists are linked 2-element Javascript arrays.
-    
-      So that lists are all immutable we Object.freeze in newer 
-      Javascript runtimes.
-      
-      In older engines freeze should have been polyfilled as the 
-      identity function. */
-   return Object.freeze([x,xs]);
+          
+      Ideally the return here would be Object.freeze([x,xs])
+      so that bugs related to mutation are found fast.
+      However, cons is right on the critical path for
+      performance and this slows oboe-mark down by
+      ~25%. Under theoretical future JS engines that freeze more
+      efficiently (possibly even use immutability to
+      run faster) this should be considered for
+      restoration.
+   */
+   
+   return [x,xs];
 }
 
 /**
@@ -483,12 +491,12 @@ function all(fn, list) {
  * it doesn't return anything. Hence, this is only really useful if the
  * functions being called have side-effects. 
  */
-function applyEach(fnList, arguments) {
+function applyEach(fnList, args) {
 
    if( fnList ) {  
-      head(fnList).apply(null, arguments);
+      head(fnList).apply(null, args);
       
-      applyEach(tail(fnList), arguments);
+      applyEach(tail(fnList), args);
    }
 }
 
@@ -516,328 +524,328 @@ function first(test, list) {
                   ? head(list) 
                   : first(test,tail(list))); 
 }
+
 /* 
    This is a slightly hacked-up browser only version of clarinet 
-   with some features removed to help keep Oboe under 
-   the 5k micro-library limit
+   
+      *  some features removed to help keep browser Oboe under 
+         the 5k micro-library limit
+      *  plug directly into event bus
    
    For the original go here:
       https://github.com/dscape/clarinet
+
+   We receive the events:
+      STREAM_DATA
+      STREAM_END
+      
+   We emit the events:
+      SAX_KEY
+      SAX_VALUE_OPEN
+      SAX_VALUE_CLOSE      
+      FAIL_EVENT      
  */
 
-var clarinet = (function () {
-
-  var clarinet = {
-     parser            : function () { return new CParser();},
-     CParser           : CParser,
-     MAX_BUFFER_LENGTH : 64 * 1024,
-     EVENTS            : [
-         "value"
-       , "string"
-       , "key"
-       , "openobject"
-       , "closeobject"
-       , "openarray"
-       , "closearray"
-       , "error"
-       , "end"
-       , "ready"
-       ]
-  };
-
-  var buffers     = [ "textNode", "numberNode" ]
-    , _n          = 0
-    ;
+function clarinet(eventBus) {
+  "use strict";
+   
+  var 
+      // shortcut some events on the bus
+      emitSaxKey           = eventBus(SAX_KEY).emit,
+      emitValueOpen        = eventBus(SAX_VALUE_OPEN).emit,
+      emitValueClose       = eventBus(SAX_VALUE_CLOSE).emit,
+      emitFail             = eventBus(FAIL_EVENT).emit,
+              
+      MAX_BUFFER_LENGTH = 64 * 1024
+  ,   stringTokenPattern = /[\\"\n]/g
+  ,   _n = 0
   
-  var BEGIN                             = _n++;
-  var VALUE                             = _n++; // general stuff
-  var OPEN_OBJECT                       = _n++; // {
-  var CLOSE_OBJECT                      = _n++; // }
-  var OPEN_ARRAY                        = _n++; // [
-  var CLOSE_ARRAY                       = _n++; // ]
-  var STRING                            = _n++; // ""
-  var OPEN_KEY                          = _n++; // , "a"
-  var CLOSE_KEY                         = _n++; // :
-  var TRUE                              = _n++; // r
-  var TRUE2                             = _n++; // u
-  var TRUE3                             = _n++; // e
-  var FALSE                             = _n++; // a
-  var FALSE2                            = _n++; // l
-  var FALSE3                            = _n++; // s
-  var FALSE4                            = _n++; // e
-  var NULL                              = _n++; // u
-  var NULL2                             = _n++; // l
-  var NULL3                             = _n++; // l
-  var NUMBER_DECIMAL_POINT              = _n++; // .
-  var NUMBER_DIGIT                      = _n;   // [0-9]
+      // states
+  ,   BEGIN                = _n++
+  ,   VALUE                = _n++ // general stuff
+  ,   OPEN_OBJECT          = _n++ // {
+  ,   CLOSE_OBJECT         = _n++ // }
+  ,   OPEN_ARRAY           = _n++ // [
+  ,   CLOSE_ARRAY          = _n++ // ]
+  ,   STRING               = _n++ // ""
+  ,   OPEN_KEY             = _n++ // , "a"
+  ,   CLOSE_KEY            = _n++ // :
+  ,   TRUE                 = _n++ // r
+  ,   TRUE2                = _n++ // u
+  ,   TRUE3                = _n++ // e
+  ,   FALSE                = _n++ // a
+  ,   FALSE2               = _n++ // l
+  ,   FALSE3               = _n++ // s
+  ,   FALSE4               = _n++ // e
+  ,   NULL                 = _n++ // u
+  ,   NULL2                = _n++ // l
+  ,   NULL3                = _n++ // l
+  ,   NUMBER_DECIMAL_POINT = _n++ // .
+  ,   NUMBER_DIGIT         = _n   // [0-9]
 
-  if (!Object.create) {
-    Object.create = function (o) {
-      function f () { this["__proto__"] = o; }
-      f.prototype = o;
-      return new f;
-    };
-  }
+      // setup initial parser values
+  ,   bufferCheckPosition  = MAX_BUFFER_LENGTH
+  ,   latestError                
+  ,   c                    
+  ,   p                    
+  ,   textNode             = ""
+  ,   numberNode           = ""     
+  ,   slashed              = false
+  ,   closed               = false
+  ,   state                = BEGIN
+  ,   stack                = []
+  ,   unicodeS             = null
+  ,   unicodeI             = 0
+  ,   depth                = 0
+  ,   position             = 0
+  ,   column               = 0  //mostly for error reporting
+  ,   line                 = 1
+  ;
 
-  if (!Object.getPrototypeOf) {
-    Object.getPrototypeOf = function (o) {
-      return o["__proto__"];
-    };
-  }
-
-  if (!Object.keys) {
-    Object.keys = function (o) {
-      var a = [];
-      for (var i in o) if (o.hasOwnProperty(i)) a.push(i);
-      return a;
-    };
-  }
-
-  function checkBufferLength (parser) {
-    var maxAllowed = Math.max(clarinet.MAX_BUFFER_LENGTH, 10)
-      , maxActual = 0
-      ;
-    for (var i = 0, l = buffers.length; i < l; i ++) {
-      var len = parser[buffers[i]].length;
-      if (len > maxAllowed) {
-        switch (buffers[i]) {
-          case "text":
-            closeText(parser);
-          break;
-
-          default:
-            error(parser, "Max buffer length exceeded: "+ buffers[i]);
-        }
-      }
-      maxActual = Math.max(maxActual, len);
+  function checkBufferLength () {
+     
+    var maxActual = 0;
+     
+    if (textNode.length > MAX_BUFFER_LENGTH) {
+      emitError("Max buffer length exceeded: textNode");
+      maxActual = Math.max(maxActual, textNode.length);
     }
-    parser.bufferCheckPosition = (clarinet.MAX_BUFFER_LENGTH - maxActual)
-                               + parser.position;
-  }
-
-  function clearBuffers (parser) {
-    for (var i = 0, l = buffers.length; i < l; i ++) {
-      parser[buffers[i]] = "";
+    if (numberNode.length > MAX_BUFFER_LENGTH) {
+      emitError("Max buffer length exceeded: numberNode");
+      maxActual = Math.max(maxActual, numberNode.length);
     }
+     
+    bufferCheckPosition = (MAX_BUFFER_LENGTH - maxActual)
+                               + position;
   }
 
-  var stringTokenPattern = /[\\"\n]/g;
+  eventBus(STREAM_DATA).on(handleData);
 
-  function CParser () {
-    var parser = this;
-    clearBuffers(parser);
-    parser.bufferCheckPosition = clarinet.MAX_BUFFER_LENGTH;
-    parser.q        = parser.c = parser.p = "";
-    parser.closed   = parser.closedRoot = parser.sawRoot = false;
-    parser.tag      = parser.error = null;
-    parser.state    = BEGIN;
-    parser.stack    = [];
-    // mostly just for error reporting
-    parser.position = parser.column = 0;
-    parser.line     = 1;
-    parser.slashed  = false;
-    parser.unicodeI = 0;
-    parser.unicodeS = null;
-    parser.depth    = 0;
-    emit(parser, "onready");
+   /* At the end of the http content close the clarinet 
+    This will provide an error if the total content provided was not 
+    valid json, ie if not all arrays, objects and Strings closed properly */
+  eventBus(STREAM_END).on(handleStreamEnd);   
+
+  function emitError (errorString) {
+     if (textNode) {
+        emitValueOpen(textNode);
+        emitValueClose();
+        textNode = "";
+     }
+
+     latestError = Error(errorString + "\nLn: "+line+
+                                       "\nCol: "+column+
+                                       "\nChr: "+c);
+     
+     emitFail(errorReport(undefined, undefined, latestError));
   }
 
-  CParser.prototype =
-    { end    : function () { end(this); }
-    , write  : write
-    , close  : function () { return this.write(null); }
-    };
+  function handleStreamEnd() {
+    if( state == BEGIN ) {
+      // Handle the case where the stream closes without ever receiving
+      // any input. This isn't an error - response bodies can be blank,
+      // particularly for 204 http responses
+      
+      // Because of how Oboe is currently implemented, we parse a
+      // completely empty stream as containing an empty object.
+      // This is because Oboe's done event is only fired when the
+      // root object of the JSON stream closes.
+      
+      // This should be decoupled and attached instead to the input stream
+      // from the http (or whatever) resource ending.
+      // If this decoupling could happen the SAX parser could simply emit
+      // zero events on a completely empty input.
+      emitValueOpen({});
+      emitValueClose();
 
-  function emit(parser, event, data) {
-    if (parser[event]) parser[event](data);
-  }
-
-  function emitNode(parser, event, data) {
-    closeValue(parser);
-    emit(parser, event, data);
-  }
-
-  function closeValue(parser, event) {
-
-    if (parser.textNode) {
-      emit(parser, (event ? event : "onvalue"), parser.textNode);
+      closed = true;
+      return;
     }
-    parser.textNode = "";
+  
+    if (state !== VALUE || depth !== 0)
+      emitError("Unexpected end");
+ 
+    if (textNode) {
+      emitValueOpen(textNode);
+      emitValueClose();
+      textNode = "";
+    }
+     
+    closed = true;
   }
 
-  function closeNumber(parser) {
-    if (parser.numberNode)
-      emit(parser, "onvalue", parseFloat(parser.numberNode));
-    parser.numberNode = "";
+  function whitespace(c){
+     return c == '\r' || c == '\n' || c == ' ' || c == '\t';
   }
-
-
-  function error (parser, er) {
-    closeValue(parser);
-    er += "\nLine: "+parser.line+
-          "\nColumn: "+parser.column+
-          "\nChar: "+parser.c;
-    er = new Error(er);
-    parser.error = er;
-    emit(parser, "onerror", er);
-    return parser;
-  }
-
-  function end(parser) {
-    if (parser.state !== VALUE || parser.depth !== 0)
-      error(parser, "Unexpected end");
-
-    closeValue(parser);
-    parser.c      = "";
-    parser.closed = true;
-    emit(parser, "onend");
-    CParser.call(parser);
-    return parser;
-  }
-
-  function write (chunk) {
-    var parser = this;
-    
+   
+  function handleData (chunk) {
+         
     // this used to throw the error but inside Oboe we will have already
     // gotten the error when it was emitted. The important thing is to
     // not continue with the parse.
-    if (this.error)
+    if (latestError)
       return;
       
-    if (parser.closed) return error(parser,
-      "Cannot write after close. Assign an onready handler.");
-    if (chunk === null) return end(parser);
-    var i = 0, c = chunk[0], p = parser.p;
+    if (closed) {
+       return emitError("Cannot write after close");
+    }
+
+    var i = 0;
+    c = chunk[0]; 
 
     while (c) {
       p = c;
-      parser.c = c = chunk.charAt(i++);
-      // if chunk doesnt have next, like streaming char by char
-      // this way we need to check if previous is really previous
-      // if not we need to reset to what the parser says is the previous
-      // from buffer
-      if(p !== c ) parser.p = p;
-      else p = parser.p;
-
+      c = chunk[i++];
       if(!c) break;
 
-      parser.position ++;
-      if (c === "\n") {
-        parser.line ++;
-        parser.column = 0;
-      } else parser.column ++;
-      switch (parser.state) {
+      position ++;
+      if (c == "\n") {
+        line ++;
+        column = 0;
+      } else column ++;
+      switch (state) {
 
         case BEGIN:
-          if (c === "{") parser.state = OPEN_OBJECT;
-          else if (c === "[") parser.state = OPEN_ARRAY;
-          else if (c !== '\r' && c !== '\n' && c !== ' ' && c !== '\t')
-            error(parser, "Non-whitespace before {[.");
+          if (c === "{") state = OPEN_OBJECT;
+          else if (c === "[") state = OPEN_ARRAY;
+          else if (!whitespace(c))
+            return emitError("Non-whitespace before {[.");
         continue;
 
         case OPEN_KEY:
         case OPEN_OBJECT:
-          if (c === '\r' || c === '\n' || c === ' ' || c === '\t') continue;
-          if(parser.state === OPEN_KEY) parser.stack.push(CLOSE_KEY);
+          if (whitespace(c)) continue;
+          if(state === OPEN_KEY) stack.push(CLOSE_KEY);
           else {
             if(c === '}') {
-              emit(parser, 'onopenobject');
-              this.depth++;
-              emit(parser, 'oncloseobject');
-              this.depth--;
-              parser.state = parser.stack.pop() || VALUE;
+              emitValueOpen({});
+              emitValueClose();
+              state = stack.pop() || VALUE;
               continue;
-            } else  parser.stack.push(CLOSE_OBJECT);
+            } else  stack.push(CLOSE_OBJECT);
           }
-          if(c === '"') parser.state = STRING;
-          else error(parser, "Malformed object key should start with \"");
+          if(c === '"')
+             state = STRING;
+          else
+             return emitError("Malformed object key should start with \" ");
         continue;
 
         case CLOSE_KEY:
         case CLOSE_OBJECT:
-          if (c === '\r' || c === '\n' || c === ' ' || c === '\t') continue;
+          if (whitespace(c)) continue;
 
           if(c===':') {
-            if(parser.state === CLOSE_OBJECT) {
-              parser.stack.push(CLOSE_OBJECT);
-              closeValue(parser, 'onopenobject');
-              this.depth++;
-            } else closeValue(parser, 'onkey');
-            parser.state  = VALUE;
+            if(state === CLOSE_OBJECT) {
+              stack.push(CLOSE_OBJECT);
+
+               if (textNode) {
+                  // was previously (in upstream Clarinet) one event
+                  //  - object open came with the text of the first
+                  emitValueOpen({});
+                  emitSaxKey(textNode);
+                  textNode = "";
+               }
+               depth++;
+            } else {
+               if (textNode) {
+                  emitSaxKey(textNode);
+                  textNode = "";
+               }
+            }
+             state  = VALUE;
           } else if (c==='}') {
-            emitNode(parser, 'oncloseobject');
-             this.depth--;
-             parser.state = parser.stack.pop() || VALUE;
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             emitValueClose();
+            depth--;
+            state = stack.pop() || VALUE;
           } else if(c===',') {
-            if(parser.state === CLOSE_OBJECT)
-              parser.stack.push(CLOSE_OBJECT);
-            closeValue(parser);
-            parser.state  = OPEN_KEY;
-          } else error(parser, 'Bad object');
+            if(state === CLOSE_OBJECT)
+              stack.push(CLOSE_OBJECT);
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             state  = OPEN_KEY;
+          } else 
+             return emitError('Bad object');
         continue;
 
         case OPEN_ARRAY: // after an array there always a value
         case VALUE:
-          if (c === '\r' || c === '\n' || c === ' ' || c === '\t') continue;
-          if(parser.state===OPEN_ARRAY) {
-            emit(parser, 'onopenarray');
-            this.depth++;             
-            parser.state = VALUE;
+          if (whitespace(c)) continue;
+          if(state===OPEN_ARRAY) {
+            emitValueOpen([]);
+            depth++;             
+            state = VALUE;
             if(c === ']') {
-              emit(parser, 'onclosearray');
-              this.depth--;
-              parser.state = parser.stack.pop() || VALUE;
+              emitValueClose();
+              depth--;
+              state = stack.pop() || VALUE;
               continue;
             } else {
-              parser.stack.push(CLOSE_ARRAY);
+              stack.push(CLOSE_ARRAY);
             }
           }
-               if(c === '"') parser.state = STRING;
-          else if(c === '{') parser.state = OPEN_OBJECT;
-          else if(c === '[') parser.state = OPEN_ARRAY;
-          else if(c === 't') parser.state = TRUE;
-          else if(c === 'f') parser.state = FALSE;
-          else if(c === 'n') parser.state = NULL;
+               if(c === '"') state = STRING;
+          else if(c === '{') state = OPEN_OBJECT;
+          else if(c === '[') state = OPEN_ARRAY;
+          else if(c === 't') state = TRUE;
+          else if(c === 'f') state = FALSE;
+          else if(c === 'n') state = NULL;
           else if(c === '-') { // keep and continue
-            parser.numberNode += c;
+            numberNode += c;
           } else if(c==='0') {
-            parser.numberNode += c;
-            parser.state = NUMBER_DIGIT;
+            numberNode += c;
+            state = NUMBER_DIGIT;
           } else if('123456789'.indexOf(c) !== -1) {
-            parser.numberNode += c;
-            parser.state = NUMBER_DIGIT;
-          } else               error(parser, "Bad value");
+            numberNode += c;
+            state = NUMBER_DIGIT;
+          } else               
+            return emitError("Bad value");
         continue;
 
         case CLOSE_ARRAY:
           if(c===',') {
-            parser.stack.push(CLOSE_ARRAY);
-            closeValue(parser, 'onvalue');
-            parser.state  = VALUE;
+            stack.push(CLOSE_ARRAY);
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             state  = VALUE;
           } else if (c===']') {
-            emitNode(parser, 'onclosearray');
-            this.depth--;
-            parser.state = parser.stack.pop() || VALUE;
-          } else if (c === '\r' || c === '\n' || c === ' ' || c === '\t')
+             if (textNode) {
+                emitValueOpen(textNode);
+                emitValueClose();
+                textNode = "";
+             }
+             emitValueClose();
+            depth--;
+            state = stack.pop() || VALUE;
+          } else if (whitespace(c))
               continue;
-          else error(parser, 'Bad array');
+          else 
+             return emitError('Bad array');
         continue;
 
         case STRING:
           // thanks thejh, this is an about 50% performance improvement.
-          var starti              = i-1
-            , slashed = parser.slashed
-            , unicodeI = parser.unicodeI
-            ;
+          var starti              = i-1;
+           
           STRING_BIGLOOP: while (true) {
 
             // zero means "no unicode active". 1-4 mean "parse some more". end after 4.
             while (unicodeI > 0) {
-              parser.unicodeS += c;
+              unicodeS += c;
               c = chunk.charAt(i++);
               if (unicodeI === 4) {
                 // TODO this might be slow? well, probably not used too often anyway
-                parser.textNode += String.fromCharCode(parseInt(parser.unicodeS, 16));
+                textNode += String.fromCharCode(parseInt(unicodeS, 16));
                 unicodeI = 0;
                 starti = i-1;
               } else {
@@ -847,32 +855,33 @@ var clarinet = (function () {
               if (!c) break STRING_BIGLOOP;
             }
             if (c === '"' && !slashed) {
-              parser.state = parser.stack.pop() || VALUE;
-              parser.textNode += chunk.substring(starti, i-1);
-              if(!parser.textNode) {
-                 emit(parser, "onvalue", "");
+              state = stack.pop() || VALUE;
+              textNode += chunk.substring(starti, i-1);
+              if(!textNode) {
+                 emitValueOpen("");
+                 emitValueClose();
               }
               break;
             }
             if (c === '\\' && !slashed) {
               slashed = true;
-              parser.textNode += chunk.substring(starti, i-1);
-              c = chunk.charAt(i++);
+              textNode += chunk.substring(starti, i-1);
+               c = chunk.charAt(i++);
               if (!c) break;
             }
             if (slashed) {
               slashed = false;
-                   if (c === 'n') { parser.textNode += '\n'; }
-              else if (c === 'r') { parser.textNode += '\r'; }
-              else if (c === 't') { parser.textNode += '\t'; }
-              else if (c === 'f') { parser.textNode += '\f'; }
-              else if (c === 'b') { parser.textNode += '\b'; }
+                   if (c === 'n') { textNode += '\n'; }
+              else if (c === 'r') { textNode += '\r'; }
+              else if (c === 't') { textNode += '\t'; }
+              else if (c === 'f') { textNode += '\f'; }
+              else if (c === 'b') { textNode += '\b'; }
               else if (c === 'u') {
                 // \uxxxx. meh!
                 unicodeI = 1;
-                parser.unicodeS = '';
+                unicodeS = '';
               } else {
-                parser.textNode += c;
+                textNode += c;
               }
               c = chunk.charAt(i++);
               starti = i-1;
@@ -882,128 +891,141 @@ var clarinet = (function () {
 
             stringTokenPattern.lastIndex = i;
             var reResult = stringTokenPattern.exec(chunk);
-            if (reResult === null) {
+            if (!reResult) {
               i = chunk.length+1;
-              parser.textNode += chunk.substring(starti, i-1);
+              textNode += chunk.substring(starti, i-1);
               break;
             }
             i = reResult.index+1;
             c = chunk.charAt(reResult.index);
             if (!c) {
-              parser.textNode += chunk.substring(starti, i-1);
+              textNode += chunk.substring(starti, i-1);
               break;
             }
           }
-          parser.slashed = slashed;
-          parser.unicodeI = unicodeI;
         continue;
 
         case TRUE:
-          if (c==='')  continue; // strange buffers
-          if (c==='r') parser.state = TRUE2;
-          else error(parser, 'Invalid true started with t'+ c);
+          if (!c)  continue; // strange buffers
+          if (c==='r') state = TRUE2;
+          else
+             return emitError( 'Invalid true started with t'+ c);
         continue;
 
         case TRUE2:
-          if (c==='')  continue;
-          if (c==='u') parser.state = TRUE3;
-          else error(parser, 'Invalid true started with tr'+ c);
+          if (!c)  continue;
+          if (c==='u') state = TRUE3;
+          else
+             return emitError('Invalid true started with tr'+ c);
         continue;
 
         case TRUE3:
-          if (c==='') continue;
+          if (!c) continue;
           if(c==='e') {
-            emit(parser, "onvalue", true);
-            parser.state = parser.stack.pop() || VALUE;
-          } else error(parser, 'Invalid true started with tru'+ c);
+            emitValueOpen(true);
+            emitValueClose();
+            state = stack.pop() || VALUE;
+          } else
+             return emitError('Invalid true started with tru'+ c);
         continue;
 
         case FALSE:
-          if (c==='')  continue;
-          if (c==='a') parser.state = FALSE2;
-          else error(parser, 'Invalid false started with f'+ c);
+          if (!c)  continue;
+          if (c==='a') state = FALSE2;
+          else
+             return emitError('Invalid false started with f'+ c);
         continue;
 
         case FALSE2:
-          if (c==='')  continue;
-          if (c==='l') parser.state = FALSE3;
-          else error(parser, 'Invalid false started with fa'+ c);
+          if (!c)  continue;
+          if (c==='l') state = FALSE3;
+          else
+             return emitError('Invalid false started with fa'+ c);
         continue;
 
         case FALSE3:
-          if (c==='')  continue;
-          if (c==='s') parser.state = FALSE4;
-          else error(parser, 'Invalid false started with fal'+ c);
+          if (!c)  continue;
+          if (c==='s') state = FALSE4;
+          else
+             return emitError('Invalid false started with fal'+ c);
         continue;
 
         case FALSE4:
-          if (c==='')  continue;
+          if (!c)  continue;
           if (c==='e') {
-            emit(parser, "onvalue", false);
-            parser.state = parser.stack.pop() || VALUE;
-          } else error(parser, 'Invalid false started with fals'+ c);
+            emitValueOpen(false);
+            emitValueClose();
+            state = stack.pop() || VALUE;
+          } else
+             return emitError('Invalid false started with fals'+ c);
         continue;
 
         case NULL:
-          if (c==='')  continue;
-          if (c==='u') parser.state = NULL2;
-          else error(parser, 'Invalid null started with n'+ c);
+          if (!c)  continue;
+          if (c==='u') state = NULL2;
+          else
+             return emitError('Invalid null started with n'+ c);
         continue;
 
         case NULL2:
-          if (c==='')  continue;
-          if (c==='l') parser.state = NULL3;
-          else error(parser, 'Invalid null started with nu'+ c);
+          if (!c)  continue;
+          if (c==='l') state = NULL3;
+          else
+             return emitError('Invalid null started with nu'+ c);
         continue;
 
         case NULL3:
-          if (c==='') continue;
+          if (!c) continue;
           if(c==='l') {
-            emit(parser, "onvalue", null);
-            parser.state = parser.stack.pop() || VALUE;
-          } else error(parser, 'Invalid null started with nul'+ c);
+            emitValueOpen(null);
+            emitValueClose();
+            state = stack.pop() || VALUE;
+          } else 
+             return emitError('Invalid null started with nul'+ c);
         continue;
 
         case NUMBER_DECIMAL_POINT:
           if(c==='.') {
-            parser.numberNode += c;
-            parser.state       = NUMBER_DIGIT;
-          } else error(parser, 'Leading zero not followed by .');
+            numberNode += c;
+            state       = NUMBER_DIGIT;
+          } else 
+             return emitError('Leading zero not followed by .');
         continue;
 
         case NUMBER_DIGIT:
-          if('0123456789'.indexOf(c) !== -1) parser.numberNode += c;
+          if('0123456789'.indexOf(c) !== -1) numberNode += c;
           else if (c==='.') {
-            if(parser.numberNode.indexOf('.')!==-1)
-              error(parser, 'Invalid number has two dots');
-            parser.numberNode += c;
+            if(numberNode.indexOf('.')!==-1)
+               return emitError('Invalid number has two dots');
+            numberNode += c;
           } else if (c==='e' || c==='E') {
-            if(parser.numberNode.indexOf('e')!==-1 ||
-               parser.numberNode.indexOf('E')!==-1 )
-               error(parser, 'Invalid number has two exponential');
-            parser.numberNode += c;
+            if(numberNode.indexOf('e')!==-1 ||
+               numberNode.indexOf('E')!==-1 )
+               return emitError('Invalid number has two exponential');
+            numberNode += c;
           } else if (c==="+" || c==="-") {
             if(!(p==='e' || p==='E'))
-              error(parser, 'Invalid symbol in number');
-            parser.numberNode += c;
+               return emitError('Invalid symbol in number');
+            numberNode += c;
           } else {
-            closeNumber(parser);
+            if (numberNode) {
+              emitValueOpen(parseFloat(numberNode));
+              emitValueClose();
+              numberNode = "";
+            }
             i--; // go back one
-            parser.state = parser.stack.pop() || VALUE;
+            state = stack.pop() || VALUE;
           }
         continue;
 
         default:
-          error(parser, "Unknown state: " + parser.state);
+          return emitError("Unknown state: " + state);
       }
     }
-    if (parser.position >= parser.bufferCheckPosition)
-      checkBufferLength(parser);
-    return parser;
+    if (position >= bufferCheckPosition)
+      checkBufferLength();
   }
-
-  return clarinet;
-})();
+}
 
 
 /** 
@@ -1014,21 +1036,58 @@ var clarinet = (function () {
  * 
  * This may also be used to clear all listeners by assigning zero handlers:
  * 
- *    clarinetListenerAdaptor( clarinet, {} )
+ *    ascentManager( clarinet, {} )
  */
-function clarinetListenerAdaptor(clarinetParser, handlers){
-    
-   var state;
+function ascentManager(oboeBus, handlers){
+   "use strict";
+   
+   var listenerId = {},
+       ascent;
 
-   clarinet.EVENTS.forEach(function(eventName){
- 
-      var handlerFunction = handlers[eventName];
+   function stateAfter(handler) {
+      return function(param){
+         ascent = handler( ascent, param);
+      }
+   }
+   
+   for( var eventName in handlers ) {
+
+      oboeBus(eventName).on(stateAfter(handlers[eventName]), listenerId);
+   }
+   
+   oboeBus(NODE_SWAP).on(function(newNode) {
       
-      clarinetParser['on'+eventName] = handlerFunction && 
-                                       function(param) {
-                                          state = handlerFunction( state, param);
-                                       };
+      var oldHead = head(ascent),
+          key = keyOf(oldHead),
+          ancestors = tail(ascent),
+          parentNode;
+
+      if( ancestors ) {
+         parentNode = nodeOf(head(ancestors));
+         parentNode[key] = newNode;
+      }
    });
+
+   oboeBus(NODE_DROP).on(function() {
+
+      var oldHead = head(ascent),
+          key = keyOf(oldHead),
+          ancestors = tail(ascent),
+          parentNode;
+
+      if( ancestors ) {
+         parentNode = nodeOf(head(ancestors));
+ 
+         delete parentNode[key];
+      }
+   });
+
+   oboeBus(ABORTING).on(function(){
+      
+      for( var eventName in handlers ) {
+         oboeBus(eventName).un(listenerId);
+      }
+   });   
 }
 
 // based on gist https://gist.github.com/monsur/706839
@@ -1055,6 +1114,73 @@ function parseResponseHeaders(headerStr) {
    
    return headers;
 }
+
+/**
+ * Detect if a given URL is cross-origin in the scope of the
+ * current page.
+ * 
+ * Browser only (since cross-origin has no meaning in Node.js)
+ *
+ * @param {Object} pageLocation - as in window.location
+ * @param {Object} ajaxHost - an object like window.location describing the 
+ *    origin of the url that we want to ajax in
+ */
+function isCrossOrigin(pageLocation, ajaxHost) {
+
+   /*
+    * NB: defaultPort only knows http and https.
+    * Returns undefined otherwise.
+    */
+   function defaultPort(protocol) {
+      return {'http:':80, 'https:':443}[protocol];
+   }
+   
+   function portOf(location) {
+      // pageLocation should always have a protocol. ajaxHost if no port or
+      // protocol is specified, should use the port of the containing page
+      
+      return location.port || defaultPort(location.protocol||pageLocation.protocol);
+   }
+
+   // if ajaxHost doesn't give a domain, port is the same as pageLocation
+   // it can't give a protocol but not a domain
+   // it can't give a port but not a domain
+   
+   return !!(  (ajaxHost.protocol  && (ajaxHost.protocol  != pageLocation.protocol)) ||
+               (ajaxHost.host      && (ajaxHost.host      != pageLocation.host))     ||
+               (ajaxHost.host      && (portOf(ajaxHost) != portOf(pageLocation)))
+          );
+}
+
+/* turn any url into an object like window.location */
+function parseUrlOrigin(url) {
+   // url could be domain-relative
+   // url could give a domain
+
+   // cross origin means:
+   //    same domain
+   //    same port
+   //    some protocol
+   // so, same everything up to the first (single) slash 
+   // if such is given
+   //
+   // can ignore everything after that   
+   
+   var URL_HOST_PATTERN = /(\w+:)?(?:\/\/)([\w.-]+)?(?::(\d+))?\/?/,
+
+         // if no match, use an empty array so that
+         // subexpressions 1,2,3 are all undefined
+         // and will ultimately return all empty
+         // strings as the parse result:
+       urlHostMatch = URL_HOST_PATTERN.exec(url) || [];
+   
+   return {
+      protocol:   urlHostMatch[1] || '',
+      host:       urlHostMatch[2] || '',
+      port:       urlHostMatch[3] || ''
+   };
+}
+
 function httpTransport(){
    return new XMLHttpRequest();
 }
@@ -1075,13 +1201,18 @@ function httpTransport(){
  * @param {String} url the url to make a request to
  * @param {String|Null} data some content to be sent with the request.
  *                      Only valid if method is POST or PUT.
- * @param {Object} [headers] the http request headers to send                       
+ * @param {Object} [headers] the http request headers to send
+ * @param {boolean} withCredentials the XHR withCredentials property will be
+ *    set to this value
  */  
-function streamingHttp(oboeBus, xhr, method, url, data, headers) {
+function streamingHttp(oboeBus, xhr, method, url, data, headers, withCredentials) {
            
+   "use strict";
+   
    var emitStreamData = oboeBus(STREAM_DATA).emit,
        emitFail       = oboeBus(FAIL_EVENT).emit,
-       numberOfCharsAlreadyGivenToCallback = 0;      
+       numberOfCharsAlreadyGivenToCallback = 0,
+       stillToSendStartEvent = true;
 
    // When an ABORTING message is put on the event bus abort 
    // the ajax request         
@@ -1122,19 +1253,30 @@ function streamingHttp(oboeBus, xhr, method, url, data, headers) {
    if('onprogress' in xhr){  // detect browser support for progressive delivery
       xhr.onprogress = handleProgress;
    }
-   
+      
    xhr.onreadystatechange = function() {
+
+      function sendStartIfNotAlready() {
+         // Internet Explorer is very unreliable as to when xhr.status etc can
+         // be read so has to be protected with try/catch and tried again on 
+         // the next readyState if it fails
+         try{
+            stillToSendStartEvent && oboeBus( HTTP_START ).emit(
+               xhr.status,
+               parseResponseHeaders(xhr.getAllResponseHeaders()) );
+            stillToSendStartEvent = false;
+         } catch(e){/* do nothing, will try again on next readyState*/}
+      }
       
       switch( xhr.readyState ) {
                
-         case 2:       
-         
-            oboeBus( HTTP_START ).emit( 
-               xhr.status,
-               parseResponseHeaders(xhr.getAllResponseHeaders()) );
-            return;
+         case 2: // HEADERS_RECEIVED
+         case 3: // LOADING
+            return sendStartIfNotAlready();
             
-         case 4:       
+         case 4: // DONE
+            sendStartIfNotAlready(); // if xhr.status hasn't been available yet, it must be NOW, huh IE?
+            
             // is this a 2xx http code?
             var successful = String(xhr.status)[0] == 2;
             
@@ -1157,7 +1299,7 @@ function streamingHttp(oboeBus, xhr, method, url, data, headers) {
             }
       }
    };
-
+   
    try{
    
       xhr.open(method, url, true);
@@ -1165,12 +1307,17 @@ function streamingHttp(oboeBus, xhr, method, url, data, headers) {
       for( var headerName in headers ){
          xhr.setRequestHeader(headerName, headers[headerName]);
       }
-      xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+      
+      if( !isCrossOrigin(window.location, parseUrlOrigin(url)) ) {
+         xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+      }
 
+      xhr.withCredentials = withCredentials;
+      
       xhr.send(data);
       
    } catch( e ) {
-
+      
       // To keep a consistent interface with Node, we can't emit an event here.
       // Node's streaming http adaptor receives the error as an asynchronous
       // event rather than as an exception. If we emitted now, the Oboe user
@@ -1320,7 +1467,7 @@ var nodeOf = attr('node');
  * to the low-level events from Clarinet and emits higher-level ones.
  *  
  * The building up is stateless so to track a JSON file
- * clarinetListenerAdaptor.js is required to store the ascent state
+ * ascentManager.js is required to store the ascent state
  * between calls.
  */
 
@@ -1348,9 +1495,10 @@ var ROOT_PATH = {};
  */ 
 function incrementalContentBuilder( oboeBus ) {
 
-   var emitNodeFound = oboeBus(NODE_FOUND).emit,
-       emitRootFound = oboeBus(ROOT_FOUND).emit,
-       emitPathFound = oboeBus(PATH_FOUND).emit;
+   var emitNodeOpened = oboeBus(NODE_OPENED).emit,
+       emitNodeClosed = oboeBus(NODE_CLOSED).emit,
+       emitRootOpened = oboeBus(ROOT_PATH_FOUND).emit,
+       emitRootClosed = oboeBus(ROOT_NODE_FOUND).emit;
 
    function arrayIndicesAreKeys( possiblyInconsistentAscent, newDeepestNode) {
    
@@ -1364,7 +1512,7 @@ function incrementalContentBuilder( oboeBus ) {
       
       return      isOfType( Array, parentNode)
                ?
-                  pathFound(  possiblyInconsistentAscent, 
+                  keyFound(  possiblyInconsistentAscent, 
                               len(parentNode), 
                               newDeepestNode
                   )
@@ -1374,13 +1522,13 @@ function incrementalContentBuilder( oboeBus ) {
                ;
    }
                  
-   function nodeFound( ascent, newDeepestNode ) {
+   function nodeOpened( ascent, newDeepestNode ) {
       
       if( !ascent ) {
          // we discovered the root node,         
-         emitRootFound( newDeepestNode);
+         emitRootOpened( newDeepestNode);
                     
-         return pathFound( ascent, ROOT_PATH, newDeepestNode);         
+         return keyFound( ascent, ROOT_PATH, newDeepestNode);         
       }
 
       // we discovered a non-root node
@@ -1423,7 +1571,7 @@ function incrementalContentBuilder( oboeBus ) {
     *    usually this won't be known so can be undefined. Can't use null 
     *    to represent unknown because null is a valid value in JSON
     **/  
-   function pathFound(ascent, newDeepestName, maybeNewDeepestNode) {
+   function keyFound(ascent, newDeepestName, maybeNewDeepestNode) {
 
       if( ascent ) { // if not root
       
@@ -1438,70 +1586,32 @@ function incrementalContentBuilder( oboeBus ) {
                                  ascent
                               );
 
-      emitPathFound( ascentWithNewPath);
+      emitNodeOpened( ascentWithNewPath);
  
       return ascentWithNewPath;
    }
 
 
    /**
-    * For when the current node ends
+    * For when the current node ends.
     */
-   function nodeFinished( ascent ) {
+   function nodeClosed( ascent ) {
 
-      emitNodeFound( ascent);
-                          
-      // pop the complete node and its path off the list:                                    
-      return tail( ascent);
+      emitNodeClosed( ascent);
+       
+      return tail( ascent) ||
+             // If there are no nodes left in the ascent the root node
+             // just closed. Emit a special event for this: 
+             emitRootClosed(nodeOf(head(ascent)));
    }      
-                 
-   return { 
 
-      openobject : function (ascent, firstKey) {
-
-         var ascentAfterNodeFound = nodeFound(ascent, {});         
-
-         /* It is a perculiarity of Clarinet that for non-empty objects it
-            gives the first key with the openobject event instead of
-            in a subsequent key event.
-                      
-            firstKey could be the empty string in a JSON object like 
-            {'':'foo'} which is technically valid.
-            
-            So can't check with !firstKey, have to see if has any 
-            defined value. */
-         return defined(firstKey)
-         ?          
-            /* We know the first key of the newly parsed object. Notify that 
-               path has been found but don't put firstKey permanently onto 
-               pathList yet because we haven't identified what is at that key 
-               yet. Give null as the value because we haven't seen that far 
-               into the json yet */
-            pathFound(ascentAfterNodeFound, firstKey)
-         :
-            ascentAfterNodeFound
-         ;
-      },
-    
-      openarray: function (ascent) {
-         return nodeFound(ascent, []);
-      },
-
-      // called by Clarinet when keys are found in objects               
-      key: pathFound,
-      
-      /* Emitted by Clarinet when primitive values are found, ie Strings,
-         Numbers, and null.
-         Because these are always leaves in the JSON, we find and finish the 
-         node in one step, expressed as functional composition: */
-      value: compose2( nodeFinished, nodeFound ),
-      
-      // we make no distinction in how we handle object and arrays closing.
-      // For both, interpret as the end of the current node.
-      closeobject: nodeFinished,
-      closearray: nodeFinished
-   };
+   var contentBuilderHandlers = {};
+   contentBuilderHandlers[SAX_VALUE_OPEN] = nodeOpened;
+   contentBuilderHandlers[SAX_VALUE_CLOSE] = nodeClosed;
+   contentBuilderHandlers[SAX_KEY] = keyFound;
+   return contentBuilderHandlers;
 }
+
 /**
  * The jsonPath evaluator compiler used for Oboe.js. 
  * 
@@ -1655,26 +1765,18 @@ var jsonPathCompiler = jsonPathSyntax(function (pathNodeSyntax,
           // the match has succeeded. Ie, we might write ..foo or !..foo
           // and both should match identically.
           terminalCaseWhenArrivingAtRoot = rootExpr(),
-          terminalCaseWhenPreviousExpressionIsSatisfied = previousExpr, 
-          recursiveCase = skip1(skipManyInner),
-          
+          terminalCaseWhenPreviousExpressionIsSatisfied = previousExpr,
+          recursiveCase = skip1(function(ascent) {
+             return cases(ascent);
+          }),
+
           cases = lazyUnion(
                      terminalCaseWhenArrivingAtRoot
                   ,  terminalCaseWhenPreviousExpressionIsSatisfied
-                  ,  recursiveCase
-                  );                        
-            
-      function skipManyInner(ascent) {
+                  ,  recursiveCase  
+                  );
       
-         if( !ascent ) {
-            // have gone past the start, not a match:         
-            return false;
-         }      
-                                                        
-         return cases(ascent);
-      }
-      
-      return skipManyInner;
+      return cases;
    }      
    
    /**
@@ -2032,6 +2134,7 @@ function pubSub(){
          
    return pubSubInstance;
 }
+
 /**
  * This file declares some constants to use as names for event types.
  */
@@ -2040,17 +2143,30 @@ var // the events which are never exported are kept as
     // the smallest possible representation, in numbers:
     _S = 1,
 
-    // fired whenever a node is found in the JSON:
-    NODE_FOUND    = _S++,
-    // fired whenever a path is found in the JSON:      
-    PATH_FOUND    = _S++,   
-             
-    FAIL_EVENT    = 'fail',    
-    ROOT_FOUND    = _S++,    
-    HTTP_START    = 'start',
-    STREAM_DATA   = 'content',
-    STREAM_END    = _S++,
-    ABORTING      = _S++;
+    // fired whenever a new node starts in the JSON stream:
+    NODE_OPENED     = _S++,
+
+    // fired whenever a node closes in the JSON stream:
+    NODE_CLOSED     = _S++,
+
+    // called if a .node callback returns a value - 
+    NODE_SWAP       = _S++,
+    NODE_DROP       = _S++,
+
+    FAIL_EVENT      = 'fail',
+   
+    ROOT_NODE_FOUND = _S++,
+    ROOT_PATH_FOUND = _S++,
+   
+    HTTP_START      = 'start',
+    STREAM_DATA     = 'data',
+    STREAM_END      = 'end',
+    ABORTING        = _S++,
+
+    // SAX events butchered from Clarinet
+    SAX_KEY          = _S++,
+    SAX_VALUE_OPEN   = _S++,
+    SAX_VALUE_CLOSE  = _S++;
     
 function errorReport(statusCode, body, error) {
    try{
@@ -2064,6 +2180,7 @@ function errorReport(statusCode, body, error) {
       thrown:error
    };
 }    
+
 /** 
  *  The pattern adaptor listens for newListener and removeListener
  *  events. When patterns are added or removed it compiles the JSONPath
@@ -2076,8 +2193,8 @@ function errorReport(statusCode, body, error) {
 function patternAdapter(oboeBus, jsonPathCompiler) {
 
    var predicateEventMap = {
-      node:oboeBus(NODE_FOUND)
-   ,  path:oboeBus(PATH_FOUND)
+      node:oboeBus(NODE_CLOSED)
+   ,  path:oboeBus(NODE_OPENED)
    };
      
    function emitMatchingNode(emitMatch, node, ascent) {
@@ -2101,14 +2218,14 @@ function patternAdapter(oboeBus, jsonPathCompiler) {
    }
 
    /* 
-    * Set up the catching of events such as NODE_FOUND and PATH_FOUND and, if 
+    * Set up the catching of events such as NODE_CLOSED and NODE_OPENED and, if 
     * matching the specified pattern, propagate to pattern-match events such as 
     * oboeBus('node:!')
     * 
     * 
     * 
     * @param {Function} predicateEvent 
-    *          either oboeBus(NODE_FOUND) or oboeBus(PATH_FOUND).
+    *          either oboeBus(NODE_CLOSED) or oboeBus(NODE_OPENED).
     * @param {Function} compiledJsonPath          
     */
    function addUnderlyingListener( fullEventName, predicateEvent, compiledJsonPath ){
@@ -2184,11 +2301,13 @@ function patternAdapter(oboeBus, jsonPathCompiler) {
  *    - listeners for various events to be added and removed
  *    - the http response header/headers to be read
  */
-function instanceApi(oboeBus){
+function instanceApi(oboeBus, contentSource){
 
    var oboeApi,
        fullyQualifiedNamePattern = /^(node|path):./,
-       rootNodeFinishedEvent = oboeBus('node:!'),
+       rootNodeFinishedEvent = oboeBus(ROOT_NODE_FOUND),
+       emitNodeDrop = oboeBus(NODE_DROP).emit,
+       emitNodeSwap = oboeBus(NODE_SWAP).emit,
 
        /**
         * Add any kind of listener that the instance api exposes 
@@ -2268,7 +2387,12 @@ function instanceApi(oboeBus){
     * Add a callback where, if .forget() is called during the callback's
     * execution, the callback will be de-registered
     */
-   function addForgettableCallback(event, callback) {
+   function addForgettableCallback(event, callback, listenerId) {
+      
+      // listnerId is optional and if not given, the original
+      // callback will be used
+      listenerId = listenerId || callback;
+      
       var safeCallback = protectedCallback(callback);
    
       event.on( function() {
@@ -2283,18 +2407,22 @@ function instanceApi(oboeBus){
                
          delete oboeApi.forget;
          
-         if( discard ) {          
-            event.un(callback);
+         if( discard ) {
+            event.un(listenerId);
          }
-      }, callback)
+      }, listenerId);
       
       return oboeApi; // chaining         
-   }  
-         
+   }
+      
+   /** 
+    *  wrap a callback so that if it throws, Oboe.js doesn't crash but instead
+    *  handles it like a normal error
+    */
    function protectedCallback( callback ) {
       return function() {
          try{      
-            callback.apply(oboeApi, arguments);   
+            return callback.apply(oboeApi, arguments);   
          }catch(e)  {
          
             // An error occured during the callback, publish it on the event bus 
@@ -2311,43 +2439,70 @@ function instanceApi(oboeBus){
     */      
    function fullyQualifiedPatternMatchEvent(type, pattern) {
       return oboeBus(type + ':' + pattern);
-   }      
+   }
+
+   function wrapCallbackToSwapNodeIfSomethingReturned( callback ) {
+      return function() {
+         var returnValueFromCallback = callback.apply(this, arguments);
+
+         if( defined(returnValueFromCallback) ) {
+            
+            if( returnValueFromCallback == oboe.drop ) {
+               emitNodeDrop();
+            } else {
+               emitNodeSwap(returnValueFromCallback);
+            }
+         }
+      }
+   }
+
+   function addSingleNodeOrPathListener(eventId, pattern, callback) {
+
+      var effectiveCallback;
+
+      if( eventId == 'node' ) {
+         effectiveCallback = wrapCallbackToSwapNodeIfSomethingReturned(callback);
+      } else {
+         effectiveCallback = callback;
+      }
       
+      addForgettableCallback(
+         fullyQualifiedPatternMatchEvent(eventId, pattern),
+         effectiveCallback,
+         callback
+      );
+   }
+
    /**
     * Add several listeners at a time, from a map
     */
-   function addListenersMap(eventId, listenerMap) {
+   function addMultipleNodeOrPathListeners(eventId, listenerMap) {
    
       for( var pattern in listenerMap ) {
-         addForgettableCallback(
-            fullyQualifiedPatternMatchEvent(eventId, pattern), 
-            listenerMap[pattern]
-         );
+         addSingleNodeOrPathListener(eventId, pattern, listenerMap[pattern]);
       }
    }    
-      
+         
    /**
     * implementation behind .onPath() and .onNode()
     */       
    function addNodeOrPathListenerApi( eventId, jsonPathOrListenerMap, callback ){
-   
+         
       if( isString(jsonPathOrListenerMap) ) {
-         addForgettableCallback(
-            fullyQualifiedPatternMatchEvent(eventId, jsonPathOrListenerMap),
-            callback
-         );
+         addSingleNodeOrPathListener(eventId, jsonPathOrListenerMap, callback);
+
       } else {
-         addListenersMap(eventId, jsonPathOrListenerMap);
+         addMultipleNodeOrPathListeners(eventId, jsonPathOrListenerMap);
       }
       
       return oboeApi; // chaining
    }
       
    
-   // some interface methods are only filled in after we recieve
+   // some interface methods are only filled in after we receive
    // values and are noops before that:          
-   oboeBus(ROOT_FOUND).on( function(root) {
-      oboeApi.root = functor(root);   
+   oboeBus(ROOT_PATH_FOUND).on( function(rootNode) {
+      oboeApi.root = functor(rootNode);   
    });
 
    /**
@@ -2388,77 +2543,22 @@ function instanceApi(oboeBus){
       
       // initially return nothing for header and root
       header         : noop,
-      root           : noop
+      root           : noop,
+      
+      source         : contentSource
    };   
 }
     
-/**
- * This file implements a light-touch central controller for an instance 
- * of Oboe which provides the methods used for interacting with the instance 
- * from the calling app.
- */
- 
- 
-function instanceController(  oboeBus, 
-                              clarinetParser, contentBuilderHandlers) {
-                                
-   oboeBus(STREAM_DATA).on( clarinetParser.write.bind(clarinetParser));      
-   
-   /* At the end of the http content close the clarinet parser.
-      This will provide an error if the total content provided was not 
-      valid json, ie if not all arrays, objects and Strings closed properly */
-   oboeBus(STREAM_END).on( clarinetParser.close.bind(clarinetParser));
-   
 
-   /* If we abort this Oboe's request stop listening to the clarinet parser. 
-      This prevents more tokens being found after we abort in the case where 
-      we aborted during processing of an already filled buffer. */
-   oboeBus(ABORTING).on( function() {
-      clarinetListenerAdaptor(clarinetParser, {});
-   });   
-
-   clarinetListenerAdaptor(clarinetParser, contentBuilderHandlers);
-  
-   // react to errors by putting them on the event bus
-   clarinetParser.onerror = function(e) {          
-      oboeBus(FAIL_EVENT).emit(          
-         errorReport(undefined, undefined, e)
-      );
-      
-      // note: don't close clarinet here because if it was not expecting
-      // end of the json it will throw an error
-   };   
-}
 /**
  * This file sits just behind the API which is used to attain a new
  * Oboe instance. It creates the new components that are required
  * and introduces them to each other.
  */
 
-function wire (httpMethodName, contentSource, body, headers){
+function wire (httpMethodName, contentSource, body, headers, withCredentials){
 
    var oboeBus = pubSub();
-
-   headers = headers ? 
-                       // Shallow-clone the headers array. This allows it to be
-                       // modified without side effects to the caller. We don't
-                       // want to change objects that the user passes in.
-                       JSON.parse(JSON.stringify(headers)) 
-                     : {};
-   
-   if( body ) {
-      if( !isString(body) ) {
-         
-         // If the body is not a string, stringify it. This allows objects to
-         // be given which will be sent as JSON.
-         body = JSON.stringify(body);
-         
-         // Default Content-Type to JSON unless given otherwise.
-         headers['Content-Type'] = headers['Content-Type'] || 'application/json';
-      }
-   } else {
-      body = null;
-   }
    
    // Wire the input stream in if we are given a content source.
    // This will usually be the case. If not, the instance created
@@ -2471,69 +2571,127 @@ function wire (httpMethodName, contentSource, body, headers){
                      httpMethodName,
                      contentSource,
                      body,
-                     headers 
+                     headers,
+                     withCredentials
       );
-   }                              
-     
-   instanceController( 
-               oboeBus, 
-               clarinet.parser(), 
-               incrementalContentBuilder(oboeBus) 
-   );
+   }
+
+   clarinet(oboeBus);
+
+   ascentManager(oboeBus, incrementalContentBuilder(oboeBus));
       
    patternAdapter(oboeBus, jsonPathCompiler);      
       
-   return new instanceApi(oboeBus);
+   return instanceApi(oboeBus, contentSource);
 }
 
-// export public API
-function oboe(arg1, arg2) {
+function applyDefaults( passthrough, url, httpMethodName, body, headers, withCredentials, cached ){
 
-   if( arg1 ) {
-      if (arg1.url) {
-   
-         // method signature is:
-         //    oboe({method:m, url:u, body:b, headers:{...}})
-   
-         return wire(
-            (arg1.method || 'GET'),
-            url(arg1.url, arg1.cached),
-            arg1.body,
-            arg1.headers
-         );
-      } else {
-   
-         //  simple version for GETs. Signature is:
-         //    oboe( url )            
-         //                                
-         return wire(
-            'GET',
-            arg1, // url
-            arg2  // body. Deprecated, use {url:u, body:b} instead
-         );
+   headers = headers ?
+      // Shallow-clone the headers array. This allows it to be
+      // modified without side effects to the caller. We don't
+      // want to change objects that the user passes in.
+      JSON.parse(JSON.stringify(headers))
+      : {};
+
+   if( body ) {
+      if( !isString(body) ) {
+
+         // If the body is not a string, stringify it. This allows objects to
+         // be given which will be sent as JSON.
+         body = JSON.stringify(body);
+
+         // Default Content-Type to JSON unless given otherwise.
+         headers['Content-Type'] = headers['Content-Type'] || 'application/json';
       }
    } else {
-      // wire up a no-AJAX Oboe. Will have to have content 
-      // fed in externally and using .emit.
-      return wire();
+      body = null;
    }
-   
+
    // support cache busting like jQuery.ajax({cache:false})
-   function url(baseUrl, cached) {
-     
+   function modifiedUrl(baseUrl, cached) {
+
       if( cached === false ) {
-           
+
          if( baseUrl.indexOf('?') == -1 ) {
             baseUrl += '?';
          } else {
             baseUrl += '&';
          }
-         
+
          baseUrl += '_=' + new Date().getTime();
       }
       return baseUrl;
    }
+
+   return passthrough( httpMethodName || 'GET', modifiedUrl(url, cached), body, headers, withCredentials || false );
 }
 
+// export public API
+function oboe(arg1) {
 
-;if ( typeof define === "function" && define.amd ) {define( "oboe", [], function () { return oboe; } );} else {window.oboe = oboe;}})(window, Object, Array, Error, JSON);
+   var nodeStreamMethodNames = list('resume', 'pause', 'pipe', 'unpipe', 'unshift'),
+       isStream = partialComplete(
+                     hasAllProperties
+                  ,  nodeStreamMethodNames
+                  );
+   
+   if( arg1 ) {
+      if (isStream(arg1) || isString(arg1)) {
+
+         //  simple version for GETs. Signature is:
+         //    oboe( url )
+         //  or, under node:
+         //    oboe( readableStream )
+         return applyDefaults(
+            wire,
+            arg1 // url
+         );
+
+      } else {
+
+         // method signature is:
+         //    oboe({method:m, url:u, body:b, headers:{...}})
+
+         return applyDefaults(
+            wire,
+            arg1.url,
+            arg1.method,
+            arg1.body,
+            arg1.headers,
+            arg1.withCredentials,
+            arg1.cached
+         );
+         
+      }
+   } else {
+      // wire up a no-AJAX, no-stream Oboe. Will have to have content 
+      // fed in externally and using .emit.
+      return wire();
+   }
+}
+
+/* oboe.drop is a special value. If a node callback returns this value the
+   parsed node is deleted from the JSON
+ */
+oboe.drop = function() {
+   return oboe.drop;
+};
+
+
+   if ( typeof define === "function" && define.amd ) {
+      define( "oboe", [], function () { return oboe; } );
+   } else if (typeof exports === 'object') {
+      module.exports = oboe;
+   } else {
+      window.oboe = oboe;
+   }
+})((function(){
+   // Access to the window object throws an exception in HTML5 web workers so
+   // point it to "self" if it runs in a web worker
+      try {
+         return window;
+      } catch (e) {
+         return self;
+      }
+   }()), Object, Array, Error, JSON);

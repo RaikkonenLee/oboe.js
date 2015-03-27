@@ -1,48 +1,50 @@
 // export public API
-function oboe(arg1, arg2) {
+function oboe(arg1) {
 
-   if( arg1 ) {
-      if (arg1.url) {
+   var nodeStreamMethodNames = list('resume', 'pause', 'pipe', 'unpipe', 'unshift'),
+       isStream = partialComplete(
+                     hasAllProperties
+                  ,  nodeStreamMethodNames
+                  );
    
+   if( arg1 ) {
+      if (isStream(arg1) || isString(arg1)) {
+
+         //  simple version for GETs. Signature is:
+         //    oboe( url )
+         //  or, under node:
+         //    oboe( readableStream )
+         return applyDefaults(
+            wire,
+            arg1 // url
+         );
+
+      } else {
+
          // method signature is:
          //    oboe({method:m, url:u, body:b, headers:{...}})
-   
-         return wire(
-            (arg1.method || 'GET'),
-            url(arg1.url, arg1.cached),
+
+         return applyDefaults(
+            wire,
+            arg1.url,
+            arg1.method,
             arg1.body,
-            arg1.headers
+            arg1.headers,
+            arg1.withCredentials,
+            arg1.cached
          );
-      } else {
-   
-         //  simple version for GETs. Signature is:
-         //    oboe( url )            
-         //                                
-         return wire(
-            'GET',
-            arg1, // url
-            arg2  // body. Deprecated, use {url:u, body:b} instead
-         );
+         
       }
    } else {
-      // wire up a no-AJAX Oboe. Will have to have content 
+      // wire up a no-AJAX, no-stream Oboe. Will have to have content 
       // fed in externally and using .emit.
       return wire();
    }
-   
-   // support cache busting like jQuery.ajax({cache:false})
-   function url(baseUrl, cached) {
-     
-      if( cached === false ) {
-           
-         if( baseUrl.indexOf('?') == -1 ) {
-            baseUrl += '?';
-         } else {
-            baseUrl += '&';
-         }
-         
-         baseUrl += '_=' + new Date().getTime();
-      }
-      return baseUrl;
-   }
 }
+
+/* oboe.drop is a special value. If a node callback returns this value the
+   parsed node is deleted from the JSON
+ */
+oboe.drop = function() {
+   return oboe.drop;
+};
